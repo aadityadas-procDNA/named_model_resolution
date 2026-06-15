@@ -68,14 +68,32 @@ def assemble(
     if target.table_type != "fact":
         return []
 
+    # ── Star schema: 1-hop dimension join detection ───────────────────────────
+    # Find all dimensions with at least one matching key column to this fact table.
+    # Their subtypes are inherited into the effective subtype set for routing.
+    # This is intentionally 1-hop only (no dim→dim traversal = no snowflake cost).
+    dim_tables = [tc for tc in all_classifications if tc.table_type == "dimension"]
+
+    join_keys: dict[str, str] = {}
+    matched_dims: list[str] = []
+    for dim in dim_tables:
+        keys = _infer_join_keys(target, dim)
+        if keys:
+            join_keys.update(keys)
+            matched_dims.append(dim.table_name)
+
+    # Effective subtypes = fact's own + inherited from joined dims (1-hop)
     subtypes = _subtypes_present(target)
+    for dim in dim_tables:
+        if dim.table_name in matched_dims:
+            # Inherit routing-relevant subtypes only (skip unknown/unmatched)
+            inherited = _subtypes_present(dim) - {"unknown", "unmatched"}
+            subtypes = subtypes | inherited
+
     measure_names = _measure_names_present(target)
     unclassified_cols = [
         c.name for c in target.columns if c.semantic_subtype == "unclassified_metric"
     ]
-
-    # Identify joinable dimension tables
-    dim_tables = [tc for tc in all_classifications if tc.table_type == "dimension"]
 
     # Derive use-case hints from matched catalog entry
     catalog_use_cases: list[str] = []
@@ -93,7 +111,7 @@ def assemble(
         preferred_measures: list[str] = rule.get("preferred_measures", [])
         rule_use_cases: list[str] = rule.get("use_case_hints", [])
 
-        # Gate: all required subtypes must be present
+        # Gate: all required subtypes must be present (fact + inherited dim subtypes)
         if not all(r in subtypes for r in required):
             continue
 
@@ -105,15 +123,6 @@ def assemble(
         # Normalise by theoretical max to get a 0-1 confidence
         max_score = len(required) + len(optional) * 0.3 + len(preferred_measures) * 0.5
         confidence = round(score / max_score, 3) if max_score > 0 else 0.0
-
-        # Infer join keys across dimension tables
-        join_keys: dict[str, str] = {}
-        matched_dims: list[str] = []
-        for dim in dim_tables:
-            keys = _infer_join_keys(target, dim)
-            if keys:
-                join_keys.update(keys)
-                matched_dims.append(dim.table_name)
 
         # Pass-through unclassified metrics if model accepts them
         flagged = unclassified_cols if "unclassified_metric" in accepts else []

@@ -16,6 +16,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from collections import defaultdict
+
 from named_model_resolution.catalog_parser import parse_catalog
 from named_model_resolution.classifier import classify
 from named_model_resolution.column_matcher import ColumnMatcher
@@ -24,6 +26,48 @@ from named_model_resolution.models import DatamartCatalog, RouterResult, TableCl
 
 from .connectors.base import CatalogConnector
 from .profiler import Profiler
+
+# Subtypes that carry routing signal (exclude low-information subtypes)
+_ROUTING_SUBTYPES = {"date", "measure", "geography", "segment", "channel", "key", "flag"}
+
+
+def _routing_signature(result: RouterResult) -> frozenset[str]:
+    """Fingerprint = set of routing-relevant subtypes present in the fact table."""
+    return frozenset(
+        c.semantic_subtype
+        for c in result.classification.columns
+        if c.semantic_subtype in _ROUTING_SUBTYPES
+    )
+
+
+def _deduplicate_results(results: list[RouterResult]) -> list[RouterResult]:
+    """
+    Group fact tables by (routing_signature, top_model).
+    Within each group, the table with the most columns is the 'primary'.
+    Others are marked is_duplicate_signal=True.
+    Dimension and unknown tables are never deduplicated.
+    """
+    fact_results = [r for r in results if r.classification.table_type == "fact" and r.model_configs]
+    non_fact = [r for r in results if r not in fact_results]
+
+    # Group by signature + top model
+    groups: dict[tuple, list[RouterResult]] = defaultdict(list)
+    for r in fact_results:
+        sig = _routing_signature(r)
+        top_model = r.model_configs[0].model_name if r.model_configs else ""
+        groups[(sig, top_model)].append(r)
+
+    for group in groups.values():
+        if len(group) <= 1:
+            continue
+        # Primary = most columns (most informative routing surface)
+        group.sort(key=lambda r: len(r.classification.columns), reverse=True)
+        primary = group[0]
+        for r in group[1:]:
+            r.is_duplicate_signal = True
+            r.signal_group_primary = primary.dataset_name
+
+    return non_fact + fact_results
 
 
 class Router:
@@ -39,7 +83,7 @@ class Router:
         self._profiler = Profiler(configs_dir)
         self._configs_dir = Path(configs_dir)
 
-    def run(self, datasets: list[str] | None = None) -> list[RouterResult]:
+    def run(self, datasets: list[str] | None = None, deduplicate: bool = False) -> list[RouterResult]:
         """
         Run the full routing pipeline.
 
@@ -102,5 +146,8 @@ class Router:
                     warnings=warnings,
                 )
             )
+
+        if deduplicate:
+            results = _deduplicate_results(results)
 
         return results

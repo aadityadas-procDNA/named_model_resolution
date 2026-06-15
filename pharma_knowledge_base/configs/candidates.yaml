@@ -20,6 +20,7 @@ geography_candidates:
 
 date_candidates:
   - week_end_date
+  - week_start_date
   - month_end_date
   - period
   - fill_date
@@ -43,6 +44,9 @@ date_candidates:
   - report_date
   - as_of_date
   - snapshot_date
+  - activity_date
+  - invoice_date
+  - diagnosis_date
 
 measure_candidates:
   - persistency
@@ -73,8 +77,6 @@ measure_candidates:
   - avg_oop
   - total_patient_responsibility
   - days_to_fill
-  - inflow_flag  # treated as count-style measure when numeric
-  - outflow_flag
   - total_patients
   - diagnosed_patients
   - treated_patients
@@ -89,9 +91,85 @@ measure_candidates:
   - paid_claims
   - rejected_claims
   - reversed_claims
-  - adherence_ratio
   - days_on_therapy
   - dot
+  - sales
+  - revenue
+  - total_sales
+  - total_revenue
+  - spend
+  - total_spend
+  - net_sales
+  - gross_sales
+  - competitor_spend
+  - baseline          # MMM baseline component
+  - n_hcps
+  - n_patients
+  - n_rows
+  - n_weeks
+  - total_rte         # Remote Touchpoint Engagements (count metric)
+  - total_calls
+  - total_samples
+
+# ── Pharma engagement / promotional channels ─────────────────────────────────
+# Used to gate MMM routing — MMM only fires when channel data is present.
+channel_candidates:
+  # Rep / field activity
+  - f2f
+  - face_to_face
+  - f2f_short_call
+  - f2f_accompanied
+  - phone_call
+  - remote_call
+  - rte
+  - total_rte
+  - in_person
+  # Sampling
+  - samples
+  - sample_drop
+  - drug_samples
+  # Speaker / medical education
+  - speaker
+  - speaker_program
+  - msl
+  - peer_interaction
+  # Email / digital owned
+  - email_delivered
+  - email_opens
+  - email_clicks
+  - email_clicked
+  - tp_email_delivered
+  - tp_email_opens
+  - tp_email_clicked
+  - tp_email_clicks
+  # Digital platforms (pharma-specific HCP)
+  - doximity
+  - doximity_opens
+  - epocrates
+  - epocrates_opens
+  - sermo
+  - sermo_impressions
+  - ehr_impressions
+  - ehr
+  # Paid media
+  - impressions
+  - clicks
+  - grps
+  - tv_grps
+  - audio_impressions
+  - display_impressions
+  - video_impressions
+  - standard_display_impressions
+  - standard_display_clicks
+  - programmatic_display_impressions
+  - programmatic_video_impressions
+  - social_impressions
+  - social_clicks
+  # Generic channel tokens (matched via token overlap)
+  - channel_spend
+  - media_spend
+  - promo_spend
+  - detailing
 
 # Suffixes/prefixes used for key detection (checked against column name)
 key_candidates_suffixes:
@@ -100,6 +178,20 @@ key_candidates_suffixes:
   - _npi
   - _code
   - _key
+
+# Suffixes/prefixes that indicate a numeric index/rank — suppress date matching
+numeric_indicator_suffixes:
+  - _idx
+  - _index
+  - _num
+  - _rank
+  - _bin
+  - _order
+  - _seq
+
+numeric_indicator_prefixes:
+  - n_
+  - num_
 
 # Flag column patterns
 flag_prefixes:
@@ -126,3 +218,6 @@ segment_candidates:
   - indication_flag
   - event_type
   - previous_status
+  - lifecycle_stage
+  - anomaly_type
+  - bucket

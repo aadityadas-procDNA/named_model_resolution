@@ -48,7 +48,8 @@ def build_connector(args: argparse.Namespace):
 
 def print_result_summary(result) -> None:
     print(f"\n{'─' * 60}")
-    print(f"Dataset     : {result.dataset_name}")
+    dup_note = f"  [duplicate of {result.signal_group_primary}]" if result.is_duplicate_signal else ""
+    print(f"Dataset     : {result.dataset_name}{dup_note}")
     print(f"Table type  : {result.classification.table_type}")
     if result.classification.matched_catalog_entry:
         score = result.classification.catalog_match_score
@@ -60,6 +61,11 @@ def print_result_summary(result) -> None:
             print(f"  [{mc.confidence:.2f}] {mc.model_name}")
             for uc in mc.use_cases[:2]:
                 print(f"         • {uc}")
+            if mc.dimension_tables:
+                print(f"         star schema dims: {mc.dimension_tables}")
+                if mc.join_keys:
+                    keys_str = ", ".join(f"{f}→{d}" for f, d in mc.join_keys.items())
+                    print(f"         join keys: {keys_str}")
             if mc.flagged_unclassified_columns:
                 print(f"         unclassified metrics passed through: {mc.flagged_unclassified_columns}")
     else:
@@ -97,6 +103,11 @@ def main() -> None:
     parser.add_argument("--output-dir", default=None, help="Directory to write per-model configs as JSON")
     parser.add_argument("--datasets", nargs="*", default=None, help="Specific dataset names to process")
     parser.add_argument("--run-pipelines", action="store_true", help="Execute model pipelines after routing")
+    parser.add_argument(
+        "--deduplicate",
+        action="store_true",
+        help="Suppress datasets whose routing signal duplicates a richer table in the same run",
+    )
 
     args = parser.parse_args()
 
@@ -111,10 +122,17 @@ def main() -> None:
     )
 
     print(f"Routing datasets from: {args.catalog_type} connector")
-    results = router.run(datasets=args.datasets)
+    results = router.run(datasets=args.datasets, deduplicate=args.deduplicate)
     print(f"Processed {len(results)} dataset(s)\n")
 
+    duplicates = [r for r in results if r.is_duplicate_signal]
+    if duplicates and not args.deduplicate:
+        print(f"Note: {len(duplicates)} dataset(s) have overlapping signal profiles "
+              f"(marked with [duplicate of ...] below). Use --deduplicate to suppress them.\n")
+
     for result in results:
+        if args.deduplicate and result.is_duplicate_signal:
+            continue
         print_result_summary(result)
 
     if args.output_dir:

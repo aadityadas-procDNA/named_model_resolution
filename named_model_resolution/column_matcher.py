@@ -4,7 +4,7 @@ Layer 2 — Column semantic subtype matcher.
 Matching pipeline (in order, first match wins):
   1. Normalize column name (lowercase, special chars → _)
   2. Abbreviation expansion (abbreviations.yaml)
-  3. Candidate list matching (candidates.yaml) — exact / substring
+  3. Candidate list matching (candidates.yaml) — exact / token-boundary substring
   4. Structural heuristics:
        - token overlap with candidate lists → partial match
        - dtype = date/timestamp → "date"
@@ -15,8 +15,8 @@ Matching pipeline (in order, first match wins):
 Confidence scale:
   1.0 — candidate list exact match
   0.9 — dtype-based date heuristic
-  0.8 — abbreviation expansion + then candidate list hit
-  0.6 — token overlap / substring heuristic
+  0.8 — abbreviation expansion + then candidate list hit, OR token-boundary substring match
+  0.6 — token overlap / partial heuristic
   0.5 — guardrail_metric (numeric fallback)
   0.4 — dimension_attribute (low-cardinality string)
   0.0 — unknown (genuinely unclassifiable)
@@ -62,12 +62,41 @@ def _has_flag_pattern(name: str, prefixes: list[str], suffixes: list[str]) -> bo
     return any(name.startswith(p) for p in prefixes) or any(name.endswith(s) for s in suffixes)
 
 
+def _is_numeric_indicator(
+    name: str,
+    numeric_suffixes: list[str],
+    numeric_prefixes: list[str],
+) -> bool:
+    """True for names like week_idx, n_patients, row_num — numeric indices/counts, not dates."""
+    return (
+        any(name.endswith(s) for s in numeric_suffixes)
+        or any(name.startswith(p) for p in numeric_prefixes)
+    )
+
+
+def _token_boundary_match(candidate: str, name: str) -> bool:
+    """
+    True when candidate's tokens are a subset of name's tokens (or vice versa),
+    using underscore as the word delimiter.
+
+    This prevents 'week' matching 'n_weeks' (different token: 'weeks' ≠ 'week')
+    and 'y' matching 'year' (not a token in 'year').
+    """
+    c_tokens = {t for t in candidate.split("_") if t}
+    n_tokens = {t for t in name.split("_") if t}
+    if not c_tokens or not n_tokens:
+        return False
+    return c_tokens.issubset(n_tokens) or n_tokens.issubset(c_tokens)
+
+
 def _candidate_match(
     name: str,
     candidates: dict[str, list[str]],
     key_suffixes: list[str],
     flag_prefixes: list[str],
     flag_suffixes: list[str],
+    numeric_ind_suffixes: list[str],
+    numeric_ind_prefixes: list[str],
 ) -> tuple[str, float] | None:
     """Return (subtype, confidence) if name matches any candidate list, else None."""
     # Key suffix check first (surrogate/natural keys should not be mistaken for measures)
@@ -78,25 +107,31 @@ def _candidate_match(
     if _has_flag_pattern(name, flag_prefixes, flag_suffixes):
         return ("flag", 1.0)
 
-    # Exact match against named lists
-    for subtype, candidate_list in [
+    is_numeric_ind = _is_numeric_indicator(name, numeric_ind_suffixes, numeric_ind_prefixes)
+
+    _ORDERED_SUBTYPES = [
+        # channel before measure so f2f/email columns don't accidentally hit measure via token
+        ("channel", candidates.get("channel_candidates", [])),
         ("date", candidates.get("date_candidates", [])),
         ("geography", candidates.get("geography_candidates", [])),
         ("measure", candidates.get("measure_candidates", [])),
         ("segment", candidates.get("segment_candidates", [])),
-    ]:
+    ]
+
+    # Exact match
+    for subtype, candidate_list in _ORDERED_SUBTYPES:
+        # Skip date matching for known numeric-indicator columns
+        if subtype == "date" and is_numeric_ind:
+            continue
         if name in candidate_list:
             return (subtype, 1.0)
 
-    # Substring match (name contains or is contained by a candidate)
-    for subtype, candidate_list in [
-        ("date", candidates.get("date_candidates", [])),
-        ("geography", candidates.get("geography_candidates", [])),
-        ("measure", candidates.get("measure_candidates", [])),
-        ("segment", candidates.get("segment_candidates", [])),
-    ]:
+    # Token-boundary substring match
+    for subtype, candidate_list in _ORDERED_SUBTYPES:
+        if subtype == "date" and is_numeric_ind:
+            continue
         for c in candidate_list:
-            if c in name or name in c:
+            if c != name and _token_boundary_match(c, name):
                 return (subtype, 0.8)
 
     return None
@@ -105,18 +140,25 @@ def _candidate_match(
 def _token_overlap_match(
     name: str,
     candidates: dict[str, list[str]],
+    numeric_ind_suffixes: list[str],
+    numeric_ind_prefixes: list[str],
 ) -> tuple[str, float] | None:
     """Split name on _ and check if any token appears in any candidate list."""
     tokens = set(name.split("_"))
     tokens.discard("")
 
+    is_numeric_ind = _is_numeric_indicator(name, numeric_ind_suffixes, numeric_ind_prefixes)
+
     flat: dict[str, list[str]] = {
+        "channel": candidates.get("channel_candidates", []),
         "date": candidates.get("date_candidates", []),
         "geography": candidates.get("geography_candidates", []),
         "measure": candidates.get("measure_candidates", []),
         "segment": candidates.get("segment_candidates", []),
     }
     for subtype, candidate_list in flat.items():
+        if subtype == "date" and is_numeric_ind:
+            continue
         for c in candidate_list:
             c_tokens = set(c.split("_"))
             if tokens & c_tokens:
@@ -135,6 +177,8 @@ class ColumnMatcher:
         self._key_suffixes: list[str] = self._candidates.get("key_candidates_suffixes", [])
         self._flag_prefixes: list[str] = self._candidates.get("flag_prefixes", [])
         self._flag_suffixes: list[str] = self._candidates.get("flag_suffixes", [])
+        self._numeric_ind_suffixes: list[str] = self._candidates.get("numeric_indicator_suffixes", [])
+        self._numeric_ind_prefixes: list[str] = self._candidates.get("numeric_indicator_prefixes", [])
 
     def match(
         self,
@@ -167,6 +211,8 @@ class ColumnMatcher:
             self._key_suffixes,
             self._flag_prefixes,
             self._flag_suffixes,
+            self._numeric_ind_suffixes,
+            self._numeric_ind_prefixes,
         )
         if result:
             subtype, confidence = result
@@ -187,8 +233,10 @@ class ColumnMatcher:
         # Step 4 — heuristic fallbacks
         dtype_fam = _dtype_family(dtype)
 
-        # 4a — dtype date
-        if dtype_fam == "date":
+        # 4a — dtype date (only for actual date dtypes, not numeric indicators)
+        if dtype_fam == "date" and not _is_numeric_indicator(
+            norm_for_matching, self._numeric_ind_suffixes, self._numeric_ind_prefixes
+        ):
             return ColumnSpec(
                 name=name,
                 dtype=dtype,
@@ -199,7 +247,12 @@ class ColumnMatcher:
             )
 
         # 4b — token overlap
-        result = _token_overlap_match(norm_for_matching, self._candidates)
+        result = _token_overlap_match(
+            norm_for_matching,
+            self._candidates,
+            self._numeric_ind_suffixes,
+            self._numeric_ind_prefixes,
+        )
         if result:
             subtype, confidence = result
             return ColumnSpec(
@@ -234,7 +287,7 @@ class ColumnMatcher:
                 name=name,
                 dtype=dtype,
                 semantic_subtype="dimension_attribute",
-                match_source="heuristic_token",
+                match_source="heuristic_cardinality",
                 expanded_name=expanded_name,
                 confidence=0.4,
             )
