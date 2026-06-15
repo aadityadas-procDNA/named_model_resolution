@@ -70,3 +70,6 @@ class RouterResult:
     model_configs: list[ModelConfig] = field(default_factory=list)
     column_profiles: list[ColumnProfile] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+    # Signal deduplication — set by Router after all tables are processed
+    is_duplicate_signal: bool = False          # True if another table has richer same-signature routing
+    signal_group_primary: str | None = None   # Name of the primary (most informative) table in this group

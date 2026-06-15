@@ -3,10 +3,17 @@
 # Adding a new model = add an entry here + create a pipeline file. No core code changes needed.
 #
 # Scoring formula (in config_assembler.py):
-#   score = (required subtypes satisfied * 1.0)
-#         + (optional subtypes present * 0.3)
-#         + (preferred_measures matched * 0.5)
+#   score = (required subtypes ALL satisfied → 1.0 per required, else 0 total)
+#         + (optional subtypes present × 0.3)
+#         + (preferred_measures matched × 0.5)
 # A model is only a candidate when ALL required subtypes are satisfied.
+#
+# Subtypes available for routing:
+#   date | measure | geography | segment | channel | key | flag |
+#   unclassified_metric | dimension_attribute | unknown
+#
+# "channel" = pharma promotional/engagement channel columns (f2f, email, samples, digital media, etc.)
+# MMM is GATED on channel — it will not fire without channel data present.
 
 BOCPD:
   required:
@@ -14,6 +21,7 @@ BOCPD:
     - measure
   optional:
     - geography
+    - segment
   accepts:
     - unclassified_metric
   preferred_measures:
@@ -32,6 +40,7 @@ MMM:
   required:
     - date
     - measure
+    - channel
   optional:
     - geography
     - segment
@@ -40,12 +49,14 @@ MMM:
   preferred_measures:
     - trx
     - nrx
-    - total_claims
+    - sales
+    - total_sales
     - market_share
-  description: "Marketing mix attribution on spend/channel-driven facts"
+  description: "Marketing mix attribution — requires engagement channel data"
   use_case_hints:
-    - "Decompose sales drivers across payer channels"
-    - "Estimate ROI of promotional spend"
+    - "Decompose sales/TRx drivers across promotional channels"
+    - "Estimate ROI and optimal channel mix"
+    - "Quantify HCP reach, frequency, and engagement saturation"
 
 PSI:
   required:
@@ -80,6 +91,7 @@ ARIMA:
     - persistency
     - market_share
     - patient_count
+    - sales
   description: "Seasonal trend modeling (ARIMA / SARIMA / Prophet)"
   note: "Fallback time-series model when BOCPD has no clear changepoint hypothesis"
   use_case_hints:
