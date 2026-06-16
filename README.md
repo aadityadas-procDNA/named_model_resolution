@@ -1,259 +1,195 @@
 # Named Model Resolution
 
-A **data-aware model router** for pharma analytics gold-layer datasets. Give it a catalog (folder of files, a database, or a Databricks schema), and it:
+A **data-aware model router + insights pipeline** for pharma analytics gold-layer datasets.
+
+Given a catalog (Databricks Unity Catalog, a SQL database, or a folder of files), it:
 
 1. Discovers all tables/datasets
-2. Classifies each column by semantic subtype (`date`, `measure`, `geography`, `segment`, …)
+2. Classifies each column by semantic subtype (`date`, `measure`, `geography`, `segment`, `channel`, …)
 3. Handles abbreviated column names (`WK_END`, `TRX`, `NBRX`) via an expansion dictionary
 4. Routes each fact table to the right ML model(s) — BOCPD, MMM, PSI, ARIMA, …
-5. Profiles sample data (skewness, nulls, date grain) and recommends statistical transforms
-6. Runs per-model pipelines: detect use-cases → prep → transform → tune
+5. Resolves star-schema joins (fact → dimension, 1-hop only) to inherit column subtypes
+6. Profiles sample data (skewness, nulls, date grain) and recommends statistical transforms
+7. Runs a **quality gate** per model (fill rate, variance, collinearity, date continuity, …)
+8. Executes model pipelines (BOCPD changepoint detection, MMM attribution) and emits a structured JSON payload ready for LLM summarisation
 
 ---
 
 ## Installation
 
-### Option A — Local development
+### On Databricks (primary target)
 
-```bash
-git clone <repo>
-cd named_model_resolution
-pip install -e .          # installs both packages + all deps
-```
+This repo uses two packages installed from source:
+- `named_model_resolution/` + `orchestrator/` + `insights_runner/` — this repo
+- `insights_generation/` — the BOCPD + MMM pipeline implementations (heavier deps: PyMC, bayesian-changepoint-detection)
 
-Or with `uv`:
-```bash
-uv pip install -e .
-```
-
-### Option B — Databricks notebook (recommended pattern)
-
-The standard `%pip` magic restarts the kernel automatically and is the simplest approach:
+**Option A — `%pip` (recommended, auto-restarts kernel)**
 
 ```python
-# Cell 1 — must be the very first cell; Databricks restarts the kernel after this
+# Cell 1 — must be first; Databricks restarts the kernel after %pip
 repo = "/Workspace/Users/your-user/named_model_resolution"
-%pip install -e {repo}
+%pip install -e {repo} --quiet
+%pip install -e {repo}/insights_generation --quiet
 ```
 
-All subsequent cells import normally after the restart.
-
----
-
-### Option C — Databricks notebook (no kernel restart, `subprocess` pattern)
-
-If you need to install without restarting (e.g. inside a job or a shared setup cell),
-use `subprocess` **and** manually add the repo root to `sys.path` afterward.
-`subprocess pip install` writes the `.pth` file but Python's `sys.path` is already
-frozen at kernel startup — it won't re-read it mid-session.
+**Option B — `subprocess` (no kernel restart, for jobs or shared setup cells)**
 
 ```python
 import subprocess, sys, importlib
 
-# Resolve repo root from the notebook's own path (works for any user/clone location)
 _ctx = dbutils.notebook.entry_point.getDbutils().notebook().getContext()
 _nb_path = _ctx.notebookPath().get()
-_repo_root = "/Workspace" + "/".join(_nb_path.split("/")[:-1])
+_repo = "/Workspace" + "/".join(_nb_path.split("/")[:-1])
 
-print(f"Repo root: {_repo_root}")
+subprocess.check_call([sys.executable, "-m", "pip", "install", "-e", _repo, "--quiet"])
+subprocess.check_call([sys.executable, "-m", "pip", "install", "-e", f"{_repo}/insights_generation", "--quiet"])
 
-# 1. Install the package (writes .pth but sys.path is already frozen)
-subprocess.check_call([sys.executable, "-m", "pip", "install", "-e", _repo_root, "--quiet"])
-
-# 2. Add repo root directly so both packages are importable immediately
-if _repo_root not in sys.path:
-    sys.path.insert(0, _repo_root)
-
-# 3. Tell Python to re-scan for newly visible modules
+if _repo not in sys.path:
+    sys.path.insert(0, _repo)
 importlib.invalidate_caches()
-
-print("sys.path updated — imports are ready")
+print("Install complete — imports ready")
 ```
 
-Then in the next cell, imports work immediately without a restart:
+> **Python version:** Requires >= 3.10. DBR 14.x = Python 3.10, DBR 15.x = Python 3.12.
+> **PyMC sampling:** Use a single-node cluster (GPU or high-memory). Multi-node Spark clusters will not distribute NUTS sampling.
 
-```python
-from named_model_resolution.catalog_parser import parse_catalog
-from orchestrator.connectors import FileCatalogConnector, SQLCatalogConnector
-from orchestrator.router import Router
-```
-
-> **Python version:** Requires ≥ 3.10. Databricks Runtime 14.x = Python 3.10, 15.x = Python 3.12.
-
----
-
-## Running via CLI (local)
+### Local development
 
 ```bash
-# Route datasets from a local folder of CSV/Parquet files
-python main.py \
-    --catalog-type file \
-    --catalog-path ./sample_data/ \
-    --output-dir ./output/
-
-# Process specific tables only
-python main.py \
-    --catalog-type file \
-    --catalog-path ./sample_data/ \
-    --datasets Gold_Rx_Claims Gold_Patient_Adherence
-
-# Route AND run the top-ranked pipeline for each dataset
-python main.py \
-    --catalog-type file \
-    --catalog-path ./sample_data/ \
-    --run-pipelines
-
-# Write per-dataset routing configs as JSON to ./output/
-python main.py \
-    --catalog-type file \
-    --catalog-path ./sample_data/ \
-    --output-dir ./output/
+pip install -e .
+pip install -e insights_generation/   # only needed if using BOCPD/MMM runners
 ```
 
 ---
 
-## Running in a Databricks Notebook
+## Running on Databricks — Full Notebook Pattern
 
-After installation (see above), create a `main.ipynb` with the following pattern:
+### Cell 1 — Install (see above)
 
-### Cell 1 — Install (first time only)
-```python
-repo = "/Workspace/Users/your-user/named_model_resolution"
-%pip install -e {repo}/named_model_resolution
-%pip install -e {repo}/orchestrator
-```
+### Cell 2 — Config paths
 
-### Cell 2 — Imports and paths
 ```python
 from pathlib import Path
 
-REPO_ROOT = Path("/Workspace/Users/your-user/named_model_resolution")
+REPO_ROOT   = Path("/Workspace/Users/your-user/named_model_resolution")
 SPEC_PATH   = REPO_ROOT / "pharma_knowledge_base/gold_layer_datamarts.csv"
 CONFIGS_DIR = REPO_ROOT / "pharma_knowledge_base/configs"
+
+# Unity Catalog location — match your workspace
+UC_CATALOG = "nexora_poc_catalog"
+UC_SCHEMA  = "gold"
 ```
 
-### Cell 3 — Choose a connector
+### Cell 3 — Connector
 
-**Option A: Local files (CSV/Parquet in a folder)**
+**Option A — Databricks Unity Catalog via SQL connector**
+
+```python
+from sqlalchemy import create_engine
+from orchestrator.connectors import SQLCatalogConnector
+
+# Install: pip install databricks-sql-connector sqlalchemy-databricks
+engine = create_engine(
+    "databricks+connector://token@<workspace-host>/<http-path>",
+    connect_args={"catalog": UC_CATALOG, "schema": UC_SCHEMA},
+)
+connector = SQLCatalogConnector(engine, schema=UC_SCHEMA)
+```
+
+**Option B — Parquet files in a UC Volume or DBFS path**
+
 ```python
 from orchestrator.connectors import FileCatalogConnector
 
-connector = FileCatalogConnector(REPO_ROOT / "sample_data")
-```
-
-**Option B: Databricks Unity Catalog via SQL**
-```python
-from sqlalchemy import create_engine
-from orchestrator.connectors import SQLCatalogConnector
-
-# Uses the Databricks SQL connector — install separately:
-#   pip install databricks-sql-connector sqlalchemy-databricks
-engine = create_engine(
-    "databricks+connector://token@<host>/<http_path>",
-    connect_args={"catalog": "hive_metastore", "schema": "gold"},
-)
-connector = SQLCatalogConnector(engine, schema="gold")
-```
-
-**Option C: Any SQLAlchemy-compatible database**
-```python
-from sqlalchemy import create_engine
-from orchestrator.connectors import SQLCatalogConnector
-
-engine = create_engine("postgresql://user:pass@host/db")
-connector = SQLCatalogConnector(engine, schema="public")
+connector = FileCatalogConnector("/Volumes/nexora_poc_catalog/gold/raw_data/")
 ```
 
 ### Cell 4 — Run the router
+
 ```python
+from named_model_resolution.catalog_parser import parse_catalog
 from orchestrator.router import Router
 
-router = Router(connector, SPEC_PATH, CONFIGS_DIR)
-results = router.run()   # pass datasets=["TableName", ...] to limit scope
-```
+catalog = parse_catalog(SPEC_PATH)
+router  = Router(connector, SPEC_PATH, CONFIGS_DIR)
 
-### Cell 5 — Inspect results
-```python
-for r in results:
-    print(f"\n{'─'*60}")
-    print(f"Dataset    : {r.dataset_name}")
-    print(f"Table type : {r.classification.table_type}")
-
-    if r.classification.matched_catalog_entry:
-        print(f"Catalog match: {r.classification.matched_catalog_entry} "
-              f"(score={r.classification.catalog_match_score:.2f})")
-
-    print("Column subtypes:")
-    for col in r.classification.columns:
-        exp = f" → {col.expanded_name}" if col.expanded_name else ""
-        print(f"  {col.name:25s} {col.semantic_subtype:20s} conf={col.confidence:.1f}{exp}")
-
-    if r.model_configs:
-        print("\nModel routing (ranked):")
-        for mc in r.model_configs:
-            print(f"  [{mc.confidence:.3f}] {mc.model_name}")
-            for uc in mc.use_cases[:2]:
-                print(f"         • {uc}")
-
-    if r.column_profiles:
-        flagged = [p for p in r.column_profiles if p.suggested_transforms]
-        if flagged:
-            print("\nTransform suggestions:")
-            for p in flagged:
-                print(f"  {p.name}: {'; '.join(p.suggested_transforms)}")
-
-    if r.warnings:
-        print("\nWarnings:")
-        for w in r.warnings:
-            print(f"  ⚠ {w}")
-```
-
-### Cell 6 — Run a specific model pipeline
-```python
-from orchestrator.pipelines import PIPELINE_REGISTRY
+# Route all tables; pass datasets=[...] to limit scope
+results = router.run(deduplicate=True)
 
 for r in results:
-    if not r.model_configs:
+    if r.is_duplicate_signal:
+        print(f"  [dup of {r.signal_group_primary}] {r.dataset_name}")
         continue
-    top_model = r.model_configs[0].model_name          # highest-confidence model
-    pipeline_cls = PIPELINE_REGISTRY.get(top_model)
-    if pipeline_cls:
-        output = pipeline_cls().run(connector, r)
-        print(output)
+    print(f"\n{r.dataset_name}  ({r.classification.table_type})")
+    for mc in r.model_configs[:3]:
+        print(f"  [{mc.confidence:.3f}] {mc.model_name}")
+    if r.warnings:
+        for w in r.warnings:
+            print(f"  WARN: {w}")
+```
+
+### Cell 5 — Run insights pipeline on a fact table
+
+```python
+from insights_runner.pipeline import run as run_insights
+
+for r in results:
+    if r.classification.table_type != "fact" or r.is_duplicate_signal:
+        continue
+
+    payload = run_insights(
+        connector=connector,
+        router_result=r,
+        catalog=catalog,
+        configs_dir=CONFIGS_DIR,
+        # models_to_run=["BOCPD"],  # restrict to skip MMM/PyMC when not needed
+    )
+
+    print(payload.to_json())   # <- feed this string directly to an LLM
+    break
+```
+
+**What `payload.to_json()` contains:**
+
+```json
+{
+  "dataset_name": "engagement_mmm_labelled",
+  "metadata": {
+    "table_type": "fact",
+    "routing": {"top_model": "MMM", "confidence": 0.717},
+    "star_schema": {"dimension_tables": ["gold_hcp_details"], "join_keys": {"hcp_id": "HCP_ID"}}
+  },
+  "quality_gate": {
+    "overall_decision": "WARN",
+    "per_model": {
+      "MMM":   {"decision": "WARN", "checks": {"channel_collinearity": {"status": "WARN", "metric": 0.87}}},
+      "BOCPD": {"decision": "PASS", "checks": {"fill_rate": {"status": "PASS", "metric": 1.0}}}
+    }
+  },
+  "model_signals": {
+    "BOCPD": {"ran": true, "signals": {"n_changepoints": 3, "cp_candidates": [...]}},
+    "MMM":   {"ran": true, "signals": {"model_fit": {"in_sample_mape": 0.062, "rhat_max": 1.003}}}
+  },
+  "warnings": ["..."],
+  "knowledge_base_context": {"use_cases": ["Decompose TRx drivers across channels"]}
+}
 ```
 
 ---
 
-## Expected Output
+## Running Locally (CLI)
 
-```
-────────────────────────────────────────────────────────────
-Dataset    : Gold_Patient_Adherence
-Table type : fact
-Catalog match: Gold_Patient_Adherence (score=0.64)
+```bash
+python main.py --catalog-type file --catalog-path ./sample_data/ --output-dir ./output/
 
-Column subtypes:
-  Patient_sk                key                  conf=1.0
-  period                    date                 conf=1.0
-  adherence_ratio           measure              conf=1.0
-  is_adherent               flag                 conf=1.0
-  MYSTERY_NUM_COL           unclassified_metric  conf=0.5
+# Specific tables only
+python main.py --catalog-type file --catalog-path ./sample_data/ --datasets Gold_Rx_Claims
 
-Model routing (ranked):
-  [0.660] PSI
-         • Patient segment distribution drift over time
-  [0.583] ARIMA
-         • Forecast weekly TRx/NRx over next N periods
-  [0.528] BOCPD
-         • Weekly persistency trend monitoring across territory
+# With pipeline execution
+python main.py --catalog-type file --catalog-path ./sample_data/ --run-pipelines
 
-Transform suggestions:
-  adherence_ratio: [ratio_bound_check] values > 1.0 found in ratio column — check for scale mismatch
-
-Warnings:
-  ⚠ Column 'MYSTERY_NUM_COL' (dtype=float64) could not be matched to a known subtype.
-    Classified as 'unclassified_metric' — will be offered to models that accept generic measures.
-    Expand candidates.yaml or abbreviations.yaml if this is a known measure.
+# Deduplicate tables with identical routing signals
+python main.py --catalog-type file --catalog-path ./sample_data/ --deduplicate
 ```
 
 ---
@@ -261,103 +197,83 @@ Warnings:
 ## Project Structure
 
 ```
-named_model_resolution/               ← Python package (directly at repo root)
-  models.py                           all shared dataclasses
-  catalog_parser.py                   parses gold_layer_datamarts.csv
-  column_matcher.py                   abbreviation expand + subtype matching + guardrail
-  classifier.py                       fact vs dimension classification
-  config_assembler.py                 ranked model config assembly
-
-orchestrator/                         ← Python package (directly at repo root)
-  connectors/
-    base.py                           CatalogConnector Protocol (interface)
-    file_connector.py                 reads CSV/Parquet from a folder
-    sql_connector.py                  reads via SQLAlchemy (Databricks, Postgres, etc.)
-  profiler.py                         samples data → skewness/grain/transform suggestions
-  router.py                           main entry point — runs the full pipeline
-  pipelines/
-    base.py                           ModelPipeline abstract base class
-    bocpd_pipeline.py                 BOCPD: changepoint detection
-    mmm_pipeline.py                   MMM: marketing mix
-    psi_pipeline.py                   PSI: population drift
-    arima_pipeline.py                 ARIMA/SARIMA/Prophet: seasonal forecasting
-    __init__.py                       PIPELINE_REGISTRY dict
-
+named_model_resolution/     core classification + routing package
+orchestrator/               connector + profiler + router + pipeline stubs
+insights_runner/            quality gate + model bridge → InsightsPayload JSON
+insights_generation/        BOCPD + MMM pipeline implementations (heavier deps)
 pharma_knowledge_base/
-  gold_layer_datamarts.csv            spec: 10 gold-layer datamarts (do not edit)
+  gold_layer_datamarts.csv  10-datamart spec (multi-section flat file)
   configs/
-    candidates.yaml                   ← ADD NEW COLUMN NAMES HERE
-    abbreviations.yaml                ← ADD NEW ABBREVIATIONS HERE
-    model_routing.yaml                ← ADD NEW MODELS HERE
-    transform_rules.yaml              statistical transform thresholds
-
-pyproject.toml                        single install config (pip install -e .)
-main.py                               CLI entry point
+    candidates.yaml         column name candidate lists (add new names here)
+    abbreviations.yaml      abbreviation map (add new abbrevs here)
+    model_routing.yaml      per-model routing rules (add new models here)
+    transform_rules.yaml    statistical transform thresholds
+pyproject.toml              single install config
+main.py                     CLI entry point
 ```
 
 ---
 
 ## How to Extend
 
-### Add a new column name / fix an unrecognised column
+### Fix an unrecognised column
 
-If a column shows up as `unclassified_metric` or `unknown` in warnings, add it to the appropriate list in `pharma_knowledge_base/configs/candidates.yaml`:
+If a column shows as `unclassified_metric` or `unknown` in warnings, add it to
+`pharma_knowledge_base/configs/candidates.yaml`:
 
 ```yaml
 measure_candidates:
-  - persistency
-  - my_new_kpi      # ← add here
+  - my_new_kpi
+channel_candidates:
+  - my_new_channel
 ```
 
 Or if it's an abbreviation, add to `abbreviations.yaml`:
 
 ```yaml
-my_abbr: my_new_kpi
+mnk: my_new_kpi
 ```
 
-### Add a new model
+### Add a new routed model (3 steps)
 
-1. Add a routing rule block to `pharma_knowledge_base/configs/model_routing.yaml`:
+1. **`model_routing.yaml`** — add a routing rule block:
 ```yaml
 CausalImpact:
   required: [date, measure]
   optional: [geography]
   accepts: [unclassified_metric]
-  preferred_measures: [trx, market_share]
+  preferred_measures: [trx]
   description: "Causal inference on intervention events"
   use_case_hints:
     - "Measure impact of a launch or label change on TRx"
 ```
 
-2. Create `orchestrator/pipelines/causal_impact_pipeline.py` implementing `ModelPipeline` (copy any existing pipeline as a template — all four stages must be implemented).
+2. **`orchestrator/pipelines/causal_impact_pipeline.py`** — implement `ModelPipeline`
 
-3. Register it in `orchestrator/pipelines/__init__.py`:
+3. **`orchestrator/pipelines/__init__.py`** — register:
 ```python
 from .causal_impact_pipeline import CausalImpactPipeline
 PIPELINE_REGISTRY["CausalImpact"] = CausalImpactPipeline
 ```
 
-No changes to the router, classifier, or column matcher are needed.
+### Add a new model to the insights runner (3 steps)
 
-### Add a new connector (e.g., BigQuery, Snowflake)
+1. **`insights_runner/quality_gate/thresholds.yaml`** — add threshold block
+2. **`insights_runner/runners/causal_impact_runner.py`** — implement `ModelRunner`
+3. **`insights_runner/runners/__init__.py`** — add to `RUNNER_REGISTRY`
 
-Create a new file in `orchestrator/connectors/` that implements the three methods from `CatalogConnector` in `base.py`:
-
-```python
-class BigQueryConnector:
-    def list_datasets(self) -> list[str]: ...
-    def get_schema(self, dataset: str) -> dict[str, str]: ...
-    def sample_rows(self, dataset: str, n: int = 1000) -> pd.DataFrame: ...
-```
-
-Pass it to `Router(connector=..., ...)` — nothing else changes.
+No other files change in either case.
 
 ---
 
 ## Key Concepts
 
-**Guardrail gate** — any numeric column that can't be matched to a known subtype is not silently dropped. It becomes `unclassified_metric` and is passed through to any model that lists `unclassified_metric` in its `accepts` rule. Warnings are always surfaced so you know what wasn't matched.
+**Quality gate** — before any expensive model run, `insights_runner` checks fill rate, zero variance, channel collinearity, date continuity, segment balance, and autocorrelation. FAIL → model skipped with reason; WARN → model runs with caveat flagged in output; PASS → model runs normally.
 
-**Routing confidence** — models are scored and returned as a ranked list, not a single hard assignment. A table with `[week_end_date, persistency, territory]` will score both BOCPD and ARIMA as candidates. Inspect `result.model_configs` to see all options.
+**Guardrail gate** — any numeric column that cannot be matched to a known subtype becomes `unclassified_metric`, is never dropped, and is passed to any model that accepts generic measures. Warnings are always surfaced.
 
-**Configs, not code** — candidate lists, abbreviation maps, routing rules, and transform thresholds are all in the YAML files under `pharma_knowledge_base/configs/`. You should rarely need to edit Python files to handle new datasets.
+**Star schema (1-hop)** — if a fact table has a foreign key to a dimension table in the catalog, the dimension's column subtypes are inherited for routing. Snowflake-style multi-hop joins are intentionally excluded (too expensive).
+
+**Routing confidence** — models are scored and returned as a ranked list. A table scores multiple candidates; inspect `result.model_configs` to see all options and their confidence scores.
+
+**Configs, not code** — candidate lists, abbreviation maps, routing rules, quality thresholds, and transform rules all live in YAML files. Rarely need to edit Python to handle new datasets or models.
