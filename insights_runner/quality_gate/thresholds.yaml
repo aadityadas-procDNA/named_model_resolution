@@ -1,0 +1,32 @@
+# insights_runner/quality_gate/thresholds.yaml
+#
+# All quality gate thresholds live here — no hard-coded values in Python.
+# Adding checks for a new model: add a block with "checks" list + thresholds.
+# The check names must match keys in CHECK_REGISTRY (assessor.py).
+
+global:
+  min_fill_rate: 0.80          # columns below this → WARN
+  fail_fill_rate: 0.50         # columns below this → FAIL (unusable)
+  zero_variance_cv: 0.01       # CV < this → column is near-constant → WARN
+  min_row_count: 52            # fewer rows than this → FAIL for any model
+
+BOCPD:
+  checks: [fill_rate, zero_variance, date_continuity, min_row_count]
+  min_weeks: 52                # need ≥1 year of weekly data
+  max_gap_weeks: 4             # tolerable gap in time series
+
+MMM:
+  checks: [fill_rate, zero_variance, channel_collinearity, min_row_count]
+  collinearity_threshold: 0.85
+  min_channel_count: 2         # need a mix of at least 2 channels
+  min_rows: 100
+
+PSI:
+  checks: [fill_rate, zero_variance, segment_balance, min_row_count]
+  max_imbalance_ratio: 10.0    # max(segment_size) / min(segment_size)
+  min_segment_size: 30
+
+ARIMA:
+  checks: [fill_rate, zero_variance, date_continuity, min_row_count, autocorrelation]
+  min_weeks: 104               # 2 seasonal cycles (2 years)
+  min_acf_lag1: 0.10           # lag-1 autocorrelation must exceed this

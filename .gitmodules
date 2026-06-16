@@ -1,0 +1,3 @@
+[submodule "insights_generation"]
+	path = insights_generation
+	url = https://github.com/aadityadas-procDNA/insights_generation.git
