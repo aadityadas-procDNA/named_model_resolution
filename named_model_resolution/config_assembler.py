@@ -52,7 +52,7 @@ def _infer_join_keys(
       2. Suffix-stripped match: strip _id / _sk / _npi / _code / _key from
          both names and retry.  Handles NPI_ID <-> NPI, TERR_ID <-> TERRITORY_SK, etc.
     """
-    _STRIP = ("_sk", "_id", "_npi", "_code", "_key")
+    _STRIP = ("_sk", "_id", "_npi", "_code", "_key", "_vid")
 
     def _strip_suffix(name: str) -> str:
         for sfx in _STRIP:

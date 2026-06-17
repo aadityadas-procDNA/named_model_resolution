@@ -33,6 +33,14 @@ import yaml
 from .models import ColumnSpec
 
 _DATE_DTYPES = {"date", "datetime", "datetime64", "timestamp", "datetime64[ns]", "datetime64[us]"}
+
+# Token-overlap date classification is gated: a column name must contain at least one
+# of these tokens to qualify as `date` via token overlap.  Without this gate, columns
+# like HCP_FIRST_NAME match `first_diagnosis_date` on the token "first" alone.
+_DATE_GATE_TOKENS = frozenset({
+    "date", "dt", "day", "week", "wk", "month", "mth",
+    "year", "yr", "quarter", "qtr", "period", "time",
+})
 _NUMERIC_DTYPES = {"int", "int64", "int32", "float", "float64", "float32", "double", "number", "numeric", "bigint"}
 _STRING_DTYPES = {"object", "str", "string", "varchar", "char", "text"}
 
@@ -158,6 +166,11 @@ def _token_overlap_match(
     }
     for subtype, candidate_list in flat.items():
         if subtype == "date" and is_numeric_ind:
+            continue
+        # Date gate: only allow date classification via token overlap when the column
+        # name itself contains a recognisable date-specific token.  This prevents false
+        # positives such as HCP_FIRST_NAME matching first_diagnosis_date on "first".
+        if subtype == "date" and not (tokens & _DATE_GATE_TOKENS):
             continue
         for c in candidate_list:
             c_tokens = set(c.split("_"))

@@ -178,6 +178,7 @@ key_candidates_suffixes:
   - _npi
   - _code
   - _key
+  - _vid    # Veeva Object IDs: hcp_vid, hco_vid, system_vid, etc.
 
 # Suffixes/prefixes that indicate a numeric index/rank — suppress date matching
 numeric_indicator_suffixes:

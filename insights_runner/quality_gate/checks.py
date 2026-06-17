@@ -70,27 +70,31 @@ def fill_rate(
 
     profiles = _profile_map(column_profiles)
 
-    # ── Date columns: worst-case (ALL must pass) ──────────────────────────────
-    worst_date_fill = 1.0
-    worst_date_col  = None
+    # ── Date columns: best-viable (AT LEAST ONE must pass) ───────────────────
+    # With multiple date columns in the schema (activity_date, CALL_DATE_VOD,
+    # FMA_DATE, ACTIVITY_YEAR, …) we only USE the best one.  Failing the model
+    # because a secondary date column has low fill is wrong.  Mirror the measure
+    # logic: at least one viable date column is sufficient.
+    best_date_fill = None
+    best_date_col  = None
     for s in date_specs:
         p = profiles.get(s.name)
         if p is None:
             continue
         fill = 1.0 - p.null_pct
-        if fill < worst_date_fill:
-            worst_date_fill = fill
-            worst_date_col  = s.name
+        if best_date_fill is None or fill > best_date_fill:
+            best_date_fill = fill
+            best_date_col  = s.name
 
-    if worst_date_col is not None and worst_date_fill < fail_fill:
+    if best_date_col is not None and best_date_fill < fail_fill:
         return QualityCheckResult(
             check_name="fill_rate",
             status="FAIL",
             detail=(
-                f"date column '{worst_date_col}' fill rate {worst_date_fill:.0%} "
-                f"< {fail_fill:.0%} (unusable)"
+                f"best date column '{best_date_col}' fill rate {best_date_fill:.0%} "
+                f"< {fail_fill:.0%} -- no viable date column"
             ),
-            metric=round(worst_date_fill, 4),
+            metric=round(best_date_fill, 4),
         )
 
     # ── Measure/channel columns: best-viable (AT LEAST ONE must pass) ─────────
@@ -137,15 +141,15 @@ def fill_rate(
         )
 
     # ── Warnings (no FAIL reached) ────────────────────────────────────────────
-    if worst_date_col is not None and worst_date_fill < min_fill:
+    if best_date_col is not None and best_date_fill < min_fill:
         return QualityCheckResult(
             check_name="fill_rate",
             status="WARN",
             detail=(
-                f"date column '{worst_date_col}' fill rate {worst_date_fill:.0%} "
+                f"best date column '{best_date_col}' fill rate {best_date_fill:.0%} "
                 f"< {min_fill:.0%} threshold"
             ),
-            metric=round(worst_date_fill, 4),
+            metric=round(best_date_fill, 4),
         )
     if best_metric_col is not None and best_metric_fill < min_fill:
         return QualityCheckResult(
@@ -173,7 +177,7 @@ def fill_rate(
         check_name="fill_rate",
         status="PASS",
         detail="all date columns adequately filled",
-        metric=round(worst_date_fill, 4) if worst_date_col is not None else None,
+        metric=round(best_date_fill, 4) if best_date_col is not None else None,
     )
 
 
@@ -241,16 +245,16 @@ def date_continuity(
     """
     max_gap_periods = params.get("max_gap_weeks", 4)   # "weeks" in YAML = periods
 
-    date_specs = _specs_by_subtype(column_specs, "date")
-    if not date_specs:
+    from ..runners._measure_selector import select_date_column
+    profiles_dict = {p.name: p for p in column_profiles}
+    date_col, _ = select_date_column(column_specs, profiles_dict)
+    if date_col is None:
         return QualityCheckResult(
             check_name="date_continuity",
             status="WARN",
             detail="no date column identified",
             metric=None,
         )
-
-    date_col = date_specs[0].name
     if date_col not in df.columns:
         return QualityCheckResult(
             check_name="date_continuity",
@@ -540,12 +544,14 @@ def autocorrelation(
             metric=None,
         )
 
-    date_specs = _specs_by_subtype(column_specs, "date")
+    from ..runners._measure_selector import select_date_column
+    _prof_dict = {p.name: p for p in column_profiles}
+    _best_date, _ = select_date_column(column_specs, _prof_dict)
     try:
         from ..runners._data_normalizer import parse_dates_flexible
         series = pd.to_numeric(df[measure_col], errors="coerce").dropna()
-        if date_specs and date_specs[0].name in df.columns:
-            date_col = date_specs[0].name
+        if _best_date and _best_date in df.columns:
+            date_col = _best_date
             sorted_df = df[[date_col, measure_col]].copy()
             sorted_df[date_col] = parse_dates_flexible(sorted_df[date_col])
             sorted_df = sorted_df.sort_values(date_col)
