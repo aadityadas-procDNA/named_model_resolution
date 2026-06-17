@@ -66,6 +66,10 @@ class Profiler:
             kurtosis: float | None = None
             value_max: float | None = None
             date_grain: str | None = None
+            mean: float | None = None
+            median: float | None = None
+            std: float | None = None
+            outlier_rate: float | None = None
 
             if subtype in {"measure", "unclassified_metric"}:
                 numeric = pd.to_numeric(series, errors="coerce").dropna()
@@ -75,6 +79,15 @@ class Profiler:
                     skewness = float(scipy_stats.skew(numeric))
                     kurtosis = float(scipy_stats.kurtosis(numeric))
                     value_max = float(numeric.max())
+                    mean = float(numeric.mean())
+                    median = float(numeric.median())
+                    std = float(numeric.std())
+                    q1 = float(numeric.quantile(0.25))
+                    q3 = float(numeric.quantile(0.75))
+                    iqr = q3 - q1
+                    outlier_rate = float(
+                        ((numeric < q1 - 1.5 * iqr) | (numeric > q3 + 1.5 * iqr)).mean()
+                    )
 
             elif subtype == "date":
                 date_grain = _infer_date_grain(series)
@@ -102,6 +115,10 @@ class Profiler:
                     unique_count=unique_count,
                     date_grain=date_grain,
                     suggested_transforms=suggested,
+                    mean=mean,
+                    median=median,
+                    std=std,
+                    outlier_rate=outlier_rate,
                 )
             )
 

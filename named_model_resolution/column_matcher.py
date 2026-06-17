@@ -179,6 +179,11 @@ class ColumnMatcher:
         self._flag_suffixes: list[str] = self._candidates.get("flag_suffixes", [])
         self._numeric_ind_suffixes: list[str] = self._candidates.get("numeric_indicator_suffixes", [])
         self._numeric_ind_prefixes: list[str] = self._candidates.get("numeric_indicator_prefixes", [])
+        self._business_hints: dict[str, str] = self._candidates.get("business_hints") or {}
+
+    def _get_hint(self, name: str, norm: str) -> str | None:
+        """Look up a business hint by original name or normalized name."""
+        return self._business_hints.get(name) or self._business_hints.get(norm) or None
 
     def match(
         self,
@@ -228,6 +233,7 @@ class ColumnMatcher:
                 match_source=match_source,
                 expanded_name=expanded_name,
                 confidence=confidence,
+                business_hint=self._get_hint(name, norm),
             )
 
         # Step 4 — heuristic fallbacks
@@ -244,6 +250,7 @@ class ColumnMatcher:
                 match_source="heuristic_dtype",
                 expanded_name=expanded_name,
                 confidence=0.9,
+                business_hint=self._get_hint(name, norm),
             )
 
         # 4b — token overlap
@@ -262,6 +269,7 @@ class ColumnMatcher:
                 match_source="heuristic_token",
                 expanded_name=expanded_name,
                 confidence=confidence,
+                business_hint=self._get_hint(name, norm),
             )
 
         # 4c — numeric fallback → unclassified_metric (guardrail gate)
@@ -279,6 +287,7 @@ class ColumnMatcher:
                 match_source="guardrail_metric",
                 expanded_name=expanded_name,
                 confidence=0.5,
+                business_hint=self._get_hint(name, norm),
             )
 
         # 4d — low-cardinality string → dimension_attribute
@@ -290,6 +299,7 @@ class ColumnMatcher:
                 match_source="heuristic_cardinality",
                 expanded_name=expanded_name,
                 confidence=0.4,
+                business_hint=self._get_hint(name, norm),
             )
 
         # 5 — genuinely unclassifiable
@@ -305,6 +315,7 @@ class ColumnMatcher:
             match_source="unmatched",
             expanded_name=expanded_name,
             confidence=0.0,
+            business_hint=self._get_hint(name, norm),
         )
 
     def match_all(
