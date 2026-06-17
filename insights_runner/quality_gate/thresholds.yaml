@@ -13,8 +13,8 @@ global:
 BOCPD:
   candidate_window_years: 2    # slice to max_date - 2 years before running
   checks: [fill_rate, zero_variance, date_continuity, min_row_count]
-  min_weeks: 52                # need >=1 year of weekly data
-  max_gap_weeks: 4             # tolerable gap in time series
+  min_years: 1                 # grain-aware minimum: 52 weeks / 12 months / 365 days
+  max_gap_weeks: 4             # tolerable gap in time series (in periods, grain-agnostic)
 
 MMM:
   candidate_window_years: 1    # slice to max_date - 1 year before running
@@ -22,6 +22,7 @@ MMM:
   collinearity_threshold: 0.85
   min_channel_count: 2         # need a mix of at least 2 channels
   min_rows: 100
+  target_grain: "auto"         # "auto" keeps current grain; "monthly" resamples weekly → monthly
 
 PSI:
   candidate_window_years: 1    # slice to max_date - 1 year before running
@@ -32,5 +33,5 @@ PSI:
 ARIMA:
   candidate_window_years: 3    # slice to max_date - 3 years (needs 2 seasonal cycles)
   checks: [fill_rate, zero_variance, date_continuity, min_row_count, autocorrelation]
-  min_weeks: 104               # 2 seasonal cycles (2 years)
+  min_years: 2                 # grain-aware minimum: 104 weeks / 24 months / 730 days
   min_acf_lag1: 0.10           # lag-1 autocorrelation must exceed this

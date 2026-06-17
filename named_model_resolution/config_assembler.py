@@ -44,11 +44,42 @@ def _infer_join_keys(
     fact: TableClassification,
     dim: TableClassification,
 ) -> dict[str, str]:
-    """Return {fact_col: dim_col} for columns of subtype 'key' shared between tables."""
+    """
+    Return {fact_col: dim_col} for key columns shared between tables.
+
+    Two-pass matching (gold layer often has no formal DDL schema):
+      1. Exact lowercase name match — original behaviour.
+      2. Suffix-stripped match: strip _id / _sk / _npi / _code / _key from
+         both names and retry.  Handles NPI_ID <-> NPI, TERR_ID <-> TERRITORY_SK, etc.
+    """
+    _STRIP = ("_sk", "_id", "_npi", "_code", "_key")
+
+    def _strip_suffix(name: str) -> str:
+        for sfx in _STRIP:
+            if name.endswith(sfx):
+                return name[: -len(sfx)]
+        return name
+
     fact_keys = {c.name.lower(): c.name for c in fact.columns if c.semantic_subtype == "key"}
-    dim_keys = {c.name.lower(): c.name for c in dim.columns if c.semantic_subtype == "key"}
-    shared = set(fact_keys) & set(dim_keys)
-    return {fact_keys[k]: dim_keys[k] for k in shared}
+    dim_keys  = {c.name.lower(): c.name for c in dim.columns  if c.semantic_subtype == "key"}
+
+    # Pass 1: exact match
+    result = {fact_keys[k]: dim_keys[k] for k in set(fact_keys) & set(dim_keys)}
+    if result:
+        return result
+
+    # Pass 2: suffix-stripped match
+    fact_stripped = {_strip_suffix(k): orig_lower for k, orig_lower in fact_keys.items()}
+    dim_stripped  = {_strip_suffix(k): orig_lower for k, orig_lower in dim_keys.items()}
+
+    for stripped in set(fact_stripped) & set(dim_stripped):
+        if not stripped:
+            continue
+        f_lower = fact_stripped[stripped]
+        d_lower = dim_stripped[stripped]
+        result[fact_keys[f_lower]] = dim_keys[d_lower]
+
+    return result
 
 
 def assemble(

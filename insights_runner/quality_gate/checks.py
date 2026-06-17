@@ -65,15 +65,32 @@ def fill_rate(
     profiles = _profile_map(column_profiles)
     worst_col = None
     worst_fill = 1.0
+    skipped_dead = 0
 
     for s in key_specs:
         p = profiles.get(s.name)
         if p is None:
             continue
+        # Completely-null measure/channel columns are dead weight: the measure selector
+        # scores them last and never picks them. Skip them here so they don't block models
+        # that have other viable columns. Date columns are NOT skipped — a null date
+        # column means no time dimension, which is a hard blocker.
+        if p.null_pct >= 1.0 and s.semantic_subtype != "date":
+            skipped_dead += 1
+            continue
         fill = 1.0 - p.null_pct
         if fill < worst_fill:
             worst_fill = fill
             worst_col = s.name
+
+    # If every measure/channel column was 100% null and nothing else was checkable, fail.
+    if worst_col is None and skipped_dead > 0:
+        return QualityCheckResult(
+            check_name="fill_rate",
+            status="FAIL",
+            detail=f"all {skipped_dead} measure/channel column(s) are 100%% null -- no viable key columns",
+            metric=0.0,
+        )
 
     if worst_col is None:
         return QualityCheckResult(
@@ -168,7 +185,6 @@ def date_continuity(
     is therefore interpreted as max_gap_periods regardless of actual grain.
     """
     max_gap_periods = params.get("max_gap_weeks", 4)   # "weeks" in YAML = periods
-    min_periods = params.get("min_weeks", params.get("min_row_count", 52))
 
     date_specs = _specs_by_subtype(column_specs, "date")
     if not date_specs:
@@ -192,11 +208,51 @@ def date_continuity(
         dates = pd.to_datetime(df[date_col]).dropna().sort_values().unique()
         n_periods = len(dates)
 
+        # ── Detect grain before checking minimums ─────────────────────────────
+        # Grain detection: prefer the stored profile grain; fall back to median gap.
+        profiles_map = _profile_map(column_profiles)
+        grain = (profiles_map.get(date_col) or type("", (), {"date_grain": None})()).date_grain
+
+        gaps_days: pd.Series | None = None
+        typical_period_days: float = 7.0  # default weekly fallback
+
+        if n_periods >= 2:
+            gaps_days = pd.Series(dates).diff().dropna().dt.days
+            _med = float(gaps_days.median())
+            if _med > 0:
+                typical_period_days = _med
+        elif grain == "monthly":
+            typical_period_days = 30.5
+        elif grain == "daily":
+            typical_period_days = 1.0
+
+        grain_label = grain if grain else f"~{typical_period_days:.0f}-day"
+
+        # ── Grain-aware minimum period count ──────────────────────────────────
+        # min_years (preferred) converts to periods based on detected grain.
+        # min_weeks falls back for configs that don't yet use min_years.
+        if "min_years" in params:
+            if typical_period_days <= 2:
+                periods_per_year = 365       # daily
+            elif typical_period_days <= 9:
+                periods_per_year = 52        # weekly
+            elif typical_period_days <= 35:
+                periods_per_year = 12        # monthly
+            else:
+                periods_per_year = 4         # quarterly / coarser
+            min_periods = int(params["min_years"] * periods_per_year)
+        else:
+            min_periods = params.get("min_weeks", params.get("min_row_count", 52))
+
         if n_periods < min_periods:
             return QualityCheckResult(
                 check_name="date_continuity",
                 status="FAIL",
-                detail=f"only {n_periods} unique dates -- need >= {min_periods}",
+                detail=(
+                    f"only {n_periods} unique {grain_label} dates -- "
+                    f"need >= {min_periods} ({params.get('min_years', min_periods)} "
+                    f"{'year(s)' if 'min_years' in params else 'periods'})"
+                ),
                 metric=float(n_periods),
             )
 
@@ -208,23 +264,18 @@ def date_continuity(
                 metric=float(n_periods),
             )
 
-        gaps_days = pd.Series(dates).diff().dropna().dt.days
+        # Use already-computed gaps for gap-continuity check
+        if gaps_days is None:
+            gaps_days = pd.Series(dates).diff().dropna().dt.days
 
-        # Detect the typical inter-observation period from the data itself.
         # This makes the check grain-agnostic: daily, weekly, monthly all normalise
         # to "number of missed periods" rather than hard-coded days * 7.
-        typical_period_days = float(gaps_days.median())
         if typical_period_days <= 0:
-            typical_period_days = 7.0  # fallback if dates are degenerate
+            typical_period_days = 7.0  # guard against degenerate dates
 
         gaps_in_periods = gaps_days / typical_period_days
         max_gap_obs = float(gaps_in_periods.max())
         n_gaps = int((gaps_in_periods > max_gap_periods).sum())
-
-        # Infer grain label for the detail message
-        profiles_map = _profile_map(column_profiles)
-        grain = (profiles_map.get(date_col) or type("", (), {"date_grain": None})()).date_grain
-        grain_label = grain if grain else f"~{typical_period_days:.0f}-day"
 
         if max_gap_obs > max_gap_periods:
             return QualityCheckResult(
