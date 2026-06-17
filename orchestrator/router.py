@@ -134,6 +134,19 @@ class Router:
             try:
                 sample = self._connector.sample_rows(name, n=1000)
                 column_profiles = self._profiler.profile(sample, classification.columns)
+
+                # Nullity scrub: completely-null non-date/non-key columns cannot serve as
+                # measures/channels. Demote them to "unknown" so the quality gate and runners
+                # never see them as key columns. (All-null SQL columns often arrive as float64
+                # via pandas NaN inference, which the numeric fallback misclassifies.)
+                _prof_lookup = {p.name: p for p in column_profiles}
+                for spec in classification.columns:
+                    prof = _prof_lookup.get(spec.name)
+                    if (prof is not None
+                            and prof.null_pct >= 1.0
+                            and spec.semantic_subtype not in {"date", "key"}):
+                        spec.semantic_subtype = "unknown"
+                        spec.confidence = 0.0
             except Exception as exc:
                 warnings.append(f"Profiling skipped for '{name}': {exc}")
 

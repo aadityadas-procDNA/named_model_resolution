@@ -190,6 +190,37 @@ class MMMRunner(ModelRunner):
         else:
             mkt = df.copy()
 
+        # ── Normalize to single time series (geographic / territory rollup) ───
+        # _aggregate_to_market only fires when hcp_id_col is present.
+        # Territory-level tables (no HCP key) fall through to df.copy() above
+        # and still have multiple rows per date.  normalize_to_series fixes that.
+        from ._data_normalizer import normalize_to_series, normalize_grain
+        _all_measure_cols = [ds.target_col] + [s.name for s in ds.channels]
+        mkt, agg_note = normalize_to_series(mkt, ds.week_col, _all_measure_cols)
+        if agg_note:
+            measure_note = (
+                (measure_note + " " + agg_note).strip() if measure_note else agg_note
+            )
+
+        # ── Grain normalization (weekly → monthly if configured) ──────────────
+        # Set target_grain: "monthly" in thresholds.yaml MMM block to activate.
+        # The runner reads thresholds directly (same source as QualityAssessor).
+        try:
+            import yaml as _yaml
+            from pathlib import Path as _Path
+            _raw = _yaml.safe_load(
+                (_Path(__file__).parent.parent / "quality_gate" / "thresholds.yaml").read_text()
+            ) or {}
+            _target_grain = {**_raw.get("global", {}), **_raw.get("MMM", {})}.get("target_grain", "auto")
+        except Exception:
+            _target_grain = "auto"
+        if _target_grain == "monthly":
+            mkt, grain_note = normalize_grain(mkt, ds.week_col, _all_measure_cols, "monthly")
+            if grain_note:
+                measure_note = (
+                    (measure_note + " " + grain_note).strip() if measure_note else grain_note
+                )
+
         # ── Add features ──────────────────────────────────────────────────────
         try:
             mkt = _add_features(mkt, ds)

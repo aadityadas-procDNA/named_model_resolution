@@ -58,10 +58,20 @@ class BOCPDRunner(ModelRunner):
         if measure_col not in df.columns:
             return {"ran": False, "reason": f"measure column '{measure_col}' missing from df"}
 
-        # ── Sort by date ──────────────────────────────────────────────────────
+        # ── Sort by date (with geographic rollup if needed) ──────────────────
         try:
             mkt = df[[date_col, measure_col]].copy()
             mkt[date_col] = pd.to_datetime(mkt[date_col])
+
+            # Collapse territory/HCP rows to a single national time series.
+            # BOCPD requires one observation per time step.
+            from ._data_normalizer import normalize_to_series
+            mkt, agg_note = normalize_to_series(mkt, date_col, [measure_col])
+            if agg_note:
+                measure_note = (
+                    (measure_note + " " + agg_note).strip() if measure_note else agg_note
+                )
+
             mkt = mkt.sort_values(date_col).reset_index(drop=True)
         except Exception as exc:
             return {"ran": False, "reason": f"date parsing failed: {exc}"}
