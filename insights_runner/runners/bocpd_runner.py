@@ -218,17 +218,23 @@ class BOCPDRunner(ModelRunner):
         specs    = router_result.classification.columns
         profiles = {p.name: p for p in router_result.column_profiles}
 
-        # ── Date column (hard requirement) ────────────────────────────────────
-        date_col = next(
-            (s.name for s in specs if s.semantic_subtype == "date"), None
+        # ── Date column: score all candidates, pick the best ─────────────────
+        from ._measure_selector import (
+            dedup_by_correlation,
+            select_date_column,
+            select_measure_columns,
         )
+        date_col, date_note = select_date_column(specs, profiles)
         if not date_col:
             return {"ran": False, "reason": "no date column identified"}
         if date_col not in df.columns:
             return {"ran": False, "reason": f"date column '{date_col}' missing from df"}
 
+        notes: list[str] = []
+        if date_note:
+            notes.append(date_note)
+
         # ── Ranked + deduplicated measure columns ─────────────────────────────
-        from ._measure_selector import dedup_by_correlation, select_measure_columns
 
         ranked   = select_measure_columns(specs, profiles)
         col_names = [c for c, _ in ranked]
@@ -249,7 +255,6 @@ class BOCPDRunner(ModelRunner):
 
         # ── Run per column ────────────────────────────────────────────────────
         by_measure: dict[str, dict] = {}
-        notes: list[str] = []
 
         # Collect measure-selection note for any unclassified_metric columns used
         unclassified_used = [

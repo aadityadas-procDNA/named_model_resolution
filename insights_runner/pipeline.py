@@ -66,16 +66,17 @@ def _window_df(
         so the LLM knows exactly which date range was analysed.
         Falls back to (full df, {}) if no date column or slicing fails.
     """
-    date_col = next(
-        (s.name for s in router_result.classification.columns
-         if s.semantic_subtype == "date"),
-        None,
+    from .runners._measure_selector import select_date_column
+    _prof_map = {p.name: p for p in router_result.column_profiles}
+    date_col, _ = select_date_column(
+        router_result.classification.columns, _prof_map
     )
     if date_col is None or date_col not in df.columns or window_years <= 0:
         return df, {}
 
     try:
-        dates = pd.to_datetime(df[date_col], errors="coerce")
+        from .runners._data_normalizer import parse_dates_flexible
+        dates = parse_dates_flexible(df[date_col])
         max_date = dates.max()
         cutoff = max_date - pd.DateOffset(years=window_years)
         mask = dates >= cutoff

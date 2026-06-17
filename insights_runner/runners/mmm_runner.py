@@ -81,7 +81,8 @@ def _build_dataset_config(
         from ._measure_selector import select_measure_column
         target_col, measure_note = select_measure_column(specs, profiles)
 
-    week_col  = next((s.name for s in specs if s.semantic_subtype == "date"), None)
+    from ._measure_selector import select_date_column
+    week_col, _ = select_date_column(specs, profiles)
     hcp_id_col = next((s.name for s in specs if s.semantic_subtype == "key"), None)
 
     if not target_col or not week_col:

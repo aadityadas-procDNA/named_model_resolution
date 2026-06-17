@@ -36,3 +36,6 @@ adhr: adherence_ratio
 adh: adherence_ratio
 dot: days_on_therapy
 lot: line_of_therapy
+# Veeva field aliases — map to canonical _id names so the key-suffix detector fires
+npi_vod: npi_id          # Veeva NPI field (double) — is an HCP identifier
+crm_user_id: crm_user_id # already ends _id; explicit for clarity

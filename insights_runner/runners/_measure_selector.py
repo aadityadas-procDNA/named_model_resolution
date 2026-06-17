@@ -1,11 +1,22 @@
 """
-Measure column selection utilities — shared across all model runners.
+Column selection utilities — shared across all model runners and quality checks.
 
-select_measure_column   — pick ONE best column (backward-compat, used by existing callers)
-select_measure_columns  — return ALL viable columns ranked by score
+select_date_column      — pick the single BEST date column (scores all date candidates)
+select_measure_column   — pick ONE best measure column (backward-compat)
+select_measure_columns  — return ALL viable measure columns ranked by score
 dedup_by_correlation    — remove near-duplicate columns (high Pearson corr) from a ranked list
 
-Scoring (applied to both 'measure' and 'unclassified_metric' columns):
+Date scoring (higher = better time-series column):
+  match_source == "heuristic_dtype" (real date/timestamp dtype)  +3.0
+  match_source in ("candidate_list", "abbreviation_expanded")    +2.0
+  match_source == "heuristic_token"                              +1.0
+  confidence bonus                                               +0.5 * confidence
+  null_pct penalty                                               -5.0 * null_pct
+  date_grain detected                                            +1.0
+  unique_count > 52                                              +0.5
+  unique_count > 12                                              +0.3
+
+Measure scoring (applied to both 'measure' and 'unclassified_metric' columns):
   measure subtype                 score = +inf  (always ranked above unclassified_metric)
   business_hint present           +2.0
   null_pct                        -3.0 * null_pct
@@ -24,7 +35,65 @@ from named_model_resolution.models import ColumnProfile, ColumnSpec
 
 
 # ---------------------------------------------------------------------------
-# Shared scoring helper
+# Date column selection
+# ---------------------------------------------------------------------------
+
+def select_date_column(
+    specs: list[ColumnSpec],
+    profiles: dict[str, ColumnProfile],
+) -> tuple[str | None, str | None]:
+    """
+    Return (best_date_col_name, warning_or_None).
+
+    Scores all date-subtype columns and returns the highest scorer.
+    Strongly prefers columns with a proper date/timestamp dtype
+    (match_source="heuristic_dtype"), high fill rate, and a detected
+    date grain.  Emits a warning when the selected column was matched
+    only via token heuristic (low-confidence selection).
+
+    Used by runners (BOCPD, MMM), quality checks (date_continuity,
+    autocorrelation, fill_rate), and the pipeline window slicer so
+    every component uses the same date column.
+    """
+    date_specs = [s for s in specs if s.semantic_subtype == "date"]
+    if not date_specs:
+        return None, None
+
+    def _score(spec: ColumnSpec) -> float:
+        score = 0.0
+        ms = spec.match_source
+        if ms == "heuristic_dtype":
+            score += 3.0
+        elif ms in ("candidate_list", "abbreviation_expanded"):
+            score += 2.0
+        elif ms == "heuristic_token":
+            score += 1.0
+        score += spec.confidence * 0.5
+
+        p = profiles.get(spec.name)
+        if p is None:
+            return score
+        score -= p.null_pct * 5.0
+        if p.date_grain is not None:
+            score += 1.0
+        if p.unique_count > 52:
+            score += 0.5
+        elif p.unique_count > 12:
+            score += 0.3
+        return score
+
+    best = max(date_specs, key=_score)
+    warning: str | None = None
+    if best.match_source == "heuristic_token":
+        warning = (
+            f"Date column '{best.name}' selected via token heuristic (low confidence). "
+            f"Consider adding it to date_candidates in candidates.yaml."
+        )
+    return best.name, warning
+
+
+# ---------------------------------------------------------------------------
+# Shared measure-scoring helper
 # ---------------------------------------------------------------------------
 
 def _score_spec(spec: ColumnSpec, profiles: dict[str, ColumnProfile]) -> float:
