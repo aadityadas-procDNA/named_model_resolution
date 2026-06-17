@@ -47,17 +47,17 @@ def _build_dataset_config(router_result: RouterResult):
     try:
         from pipeline.dataset_config import ChannelSpec, DatasetConfig
     except ImportError:
-        return None
+        return None, None
 
     specs = router_result.classification.columns
+    profiles = {p.name: p for p in router_result.column_profiles}
     _broadcast_hints = {
         "impression", "grp", "tv", "display", "programmatic",
         "social", "digital", "banner",
     }
 
-    target_col = next(
-        (s.name for s in specs if s.semantic_subtype == "measure"), None
-    )
+    from ._measure_selector import select_measure_column
+    target_col, measure_note = select_measure_column(specs, profiles)
     week_col = next(
         (s.name for s in specs if s.semantic_subtype == "date"), None
     )
@@ -66,7 +66,7 @@ def _build_dataset_config(router_result: RouterResult):
     )
 
     if not target_col or not week_col:
-        return None
+        return None, None
 
     channels = []
     for s in specs:
@@ -91,7 +91,7 @@ def _build_dataset_config(router_result: RouterResult):
         fourier_k=_FOURIER_K,
         fourier_period=_FOURIER_PERIOD,
         train_weeks=_TRAIN_WEEKS,
-    )
+    ), measure_note
 
 
 def _aggregate_to_market(df: pd.DataFrame, ds) -> pd.DataFrame:
@@ -157,7 +157,7 @@ class MMMRunner(ModelRunner):
     ) -> dict:
         # ── Build DatasetConfig ───────────────────────────────────────────────
         try:
-            ds = _build_dataset_config(router_result)
+            ds, measure_note = _build_dataset_config(router_result)
         except Exception as exc:
             return {"ran": False, "reason": f"DatasetConfig construction failed: {exc}"}
 
@@ -225,6 +225,10 @@ class MMMRunner(ModelRunner):
             import arviz as az
             from pipeline.mmm_fit import build_pymc_model
         except ImportError:
+            pymc_note = "PyMC not installed — data prep completed but model not sampled"
+            combined_note = (
+                f"{pymc_note}. {measure_note}" if measure_note else pymc_note
+            )
             return {
                 "ran": True,
                 "signals": {
@@ -234,7 +238,7 @@ class MMMRunner(ModelRunner):
                     "model_fit": None,
                     "channel_contributions": None,
                 },
-                "note": "PyMC not installed — data prep completed but model not sampled",
+                "note": combined_note,
             }
 
         try:
@@ -309,7 +313,7 @@ class MMMRunner(ModelRunner):
         except Exception:
             contributions = []
 
-        return {
+        result = {
             "ran": True,
             "signals": {
                 "channel_meta": channel_meta,
@@ -324,3 +328,6 @@ class MMMRunner(ModelRunner):
                 "channel_contributions": contributions,
             },
         }
+        if measure_note:
+            result["note"] = measure_note
+        return result

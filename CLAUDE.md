@@ -91,7 +91,7 @@ connector = SQLCatalogConnector(engine, schema="gold")
 - **BOCPD runner:** single-node, standard memory, Python-only (no Spark needed)
 - **MMM runner (PyMC/NUTS):** single-node, high-memory or GPU. Multi-node Spark clusters will NOT distribute NUTS sampling.
 
-### Key env vars read by `insights_generation/pipeline/config.py`
+### Key env vars read by `pipeline/config.py`
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
@@ -102,13 +102,13 @@ connector = SQLCatalogConnector(engine, schema="gold")
 | `GOLD_LABELLED_TABLE` | `{catalog}.gold.engagement_mmm_labelled` | Override input table |
 | `MODEL_OUTPUT_SCHEMA` | same as `UC_SCHEMA` | Override output schema |
 
-These are only used by the standalone `insights_generation` pipeline scripts (not by `insights_runner`, which constructs its own `DatasetConfig` from `RouterResult`).
+These are only used by the standalone `pipeline/` scripts (not by `insights_runner`, which constructs its own `DatasetConfig` from `RouterResult`).
 
 ### `dataset_config.json` on Databricks
 
-`pipeline/config.py` loads `dataset_config.json` on first import. If absent, it auto-detects schema from the gold table (samples 10% via Spark). After the `insights_generation/pipeline/` → `pipeline/` move, this file is now resolved relative to **repo root** (`Path(__file__).parent.parent` = repo root when `pipeline/` is at root level). On Databricks:
-- Pre-commit a tuned `dataset_config.json` to the repo root, or
-- Let it auto-detect on first notebook run (takes 30-60s for large tables)
+`pipeline/config.py` loads `dataset_config.json` from **repo root** on first import (`Path(__file__).parent.parent` = repo root). If absent:
+- On Databricks: auto-detects schema from the gold table (samples 10% via Spark, takes 30-60s)
+- Locally: falls back silently to an empty placeholder — runners always supply `dataset_config` explicitly, so this is harmless
 
 **`insights_runner` does NOT use the global `DATASET` from `pipeline/config.py`** — it builds its own `DatasetConfig` from `RouterResult` column subtypes. The `dataset_config.json` is only needed when running the standalone pipeline scripts (`pipeline/data_prep.py`, `pipeline/bocpd.py`, etc.) directly.
 
@@ -146,16 +146,17 @@ orchestrator/                     Python package (directly at repo root)
 
 insights_runner/                  Python package: quality gate + model bridge layer
   pipeline.py                     entry point: run(connector, router_result, ...) -> InsightsPayload
+                                  slices df to candidate window per model before quality gate + runner
   quality_gate/
-    thresholds.yaml               all quality thresholds per model (config-not-code)
+    thresholds.yaml               all quality thresholds + candidate_window_years per model
     models.py                     QualityCheckResult, ModelQualityReport, QualityReport
     checks.py                     pure check functions (fill_rate, collinearity, ACF, ...)
     assessor.py                   QualityAssessor + CHECK_REGISTRY (data-driven dispatch)
   runners/
     __init__.py                   RUNNER_REGISTRY dict
     base.py                       ModelRunner ABC
-    bocpd_runner.py               bridges RouterResult -> insights_generation BOCPD pipeline
-    mmm_runner.py                 bridges RouterResult -> insights_generation MMM pipeline
+    bocpd_runner.py               bridges RouterResult -> pipeline/ BOCPD; emits cp_context_windows
+    mmm_runner.py                 bridges RouterResult -> pipeline/ MMM pipeline
     psi_runner.py / arima_runner.py   stubs (quality gate runs; pipeline not yet implemented)
   output/
     models.py                     InsightsPayload dataclass + .to_json()
@@ -166,7 +167,7 @@ pipeline/                         Python package at repo root (installed via [pi
   mmm_data_prep.py                transform_channels(mkt, dataset_config=None), build_model_matrix()
   mmm_fit.py                      build_pymc_model(X, y, ..., dataset_config=None)
   dataset_config.py               DatasetConfig + ChannelSpec dataclasses
-  config.py                       global DATASET, UC-aware I/O, ON_DATABRICKS; dataset_config.json -> repo root
+  config.py                       global DATASET (placeholder locally), UC-aware I/O, ON_DATABRICKS
   data_prep.py                    aggregate_to_market(), add_features(), split()
   integration.py                  BOCPD + MMM signal integration / anomaly classification
   validation.py                   validation report generation
@@ -211,16 +212,32 @@ Star-schema join detection (1-hop): if a fact table has columns matching a dimen
 ### Quality gate + insights runner
 
 ```
-RouterResult -> connector.sample_rows(n=5000) -> QualityAssessor.assess() per model
-  FAIL -> skip model, record reason
-  WARN -> run model with caveat
-  PASS -> run model
-       -> RUNNER_REGISTRY[model_name].run(df, router_result, model_config)
-       -> OutputBuilder.build() -> InsightsPayload.to_json()
+RouterResult -> connector.sample_rows(n=5000) -> per model:
+  1. Slice df to [max_date - candidate_window_years, max_date]   (thresholds.yaml per model)
+  2. QualityAssessor.assess(df_windowed)
+       FAIL -> skip model, record reason
+       WARN/PASS -> run model
+  3. RUNNER_REGISTRY[model_name].run(df_windowed, router_result, model_config)
+  4. OutputBuilder.build() -> InsightsPayload.to_json()
 ```
 
-Quality checks are model-aware (different check sets per model, thresholds in `thresholds.yaml`).
-Runners construct `DatasetConfig` from `RouterResult` column subtypes — no `dataset_config.json` needed.
+Quality checks and runners both operate on the same windowed slice. `candidate_window` info (years, cutoff_date, max_date, n_rows) is embedded in each model's signal block.
+
+---
+
+## BOCPD Output Structure
+
+`BOCPDRunner` emits three signal keys:
+
+| Key | Description |
+|-----|-------------|
+| `cp_candidates` | All detected changepoints with metadata (date, cp_prob, exp_run_length, week_idx) |
+| `cp_context_windows` | Per-changepoint slice: ±`_CP_WINDOW_WEEKS` (default 8) rows around each CP, with log and raw measure values |
+| `cp_probs_series` | Full week-by-week cp_prob + exp_run_length for the entire candidate window (exhaustive record) |
+
+Column keys in `cp_context_windows` are named after the actual measure column: `log_{measure_col}`, `{measure_col}_at_cp`, etc. — never hardcoded to "sales" or "TRX".
+
+To adjust the context window half-width: edit `_CP_WINDOW_WEEKS` at the top of `insights_runner/runners/bocpd_runner.py`.
 
 ---
 
@@ -232,7 +249,7 @@ To add a new model to the **router** (3 steps, no core code changes):
 3. Register in `orchestrator/pipelines/__init__.py` -> `PIPELINE_REGISTRY`
 
 To add a new model to the **insights runner** (3 steps, no core code changes):
-1. Add a threshold block to `insights_runner/quality_gate/thresholds.yaml`
+1. Add a threshold block to `insights_runner/quality_gate/thresholds.yaml` (include `candidate_window_years`)
 2. Create `insights_runner/runners/<model>_runner.py` implementing `ModelRunner`
 3. Register in `insights_runner/runners/__init__.py` -> `RUNNER_REGISTRY`
 
@@ -240,21 +257,23 @@ To add a new model to the **insights runner** (3 steps, no core code changes):
 
 ## Model Routing Reference
 
-| Model | Required subtypes | Key gate | Primary use case |
-|-------|------------------|----------|-----------------|
-| **BOCPD** | date + measure | - | Weekly trend-shift / changepoint detection |
-| **MMM** | date + measure + channel | channel required | Marketing mix attribution |
-| **PSI** | date + measure + segment | - | Population / segment drift detection |
-| **ARIMA** | date + measure | - | Seasonal trend forecasting (fallback) |
+| Model | Required subtypes | Candidate window | Primary use case |
+|-------|------------------|-----------------|-----------------|
+| **BOCPD** | date + measure | 2 years | Weekly trend-shift / changepoint detection |
+| **MMM** | date + measure + channel | 1 year | Marketing mix attribution |
+| **PSI** | date + measure + segment | 1 year | Population / segment drift detection |
+| **ARIMA** | date + measure | 3 years | Seasonal trend forecasting (fallback) |
 
 ---
 
 ## Key Conventions
 
-- **Config-not-code.** Candidate lists, abbreviations, routing rules, quality thresholds, and transform rules all live in YAML files. Rarely need to edit Python to handle new datasets.
+- **Config-not-code.** Candidate lists, abbreviations, routing rules, quality thresholds, transform rules, and candidate window sizes all live in YAML files. Rarely need to edit Python to handle new datasets.
 - **`unclassified_metric` never dropped.** Flagged and passed to models that accept generic measures. Warnings always surfaced in `RouterResult.warnings`.
-- **Token-boundary matching, not greedy substring.** `"week" in "n_weeks"` was a false match. `column_matcher.py` uses token-set subset check. Numeric indicator guard (`_idx`, `n_`) further prevents false date classification.
+- **Token-boundary matching, not greedy substring.** `column_matcher.py` uses token-set subset check. Numeric indicator guard (`_idx`, `n_`) further prevents false date classification.
 - **MMM requires channel.** Adding `channel` to MMM's `required` list ensures pure sales/adherence tables don't route to MMM.
-- **`insights_generation` functions accept explicit `dataset_config`.** `transform_channels()`, `build_model_matrix()`, and `build_pymc_model()` all accept `dataset_config=None` (falls back to global `DATASET`). The runners always pass an explicit config built from `RouterResult` — no global mutation.
-- **String detail messages use ASCII only.** The quality gate check detail strings avoid Unicode (no `>=` as a unicode char) so they serialize cleanly on all platforms including Windows cp1252 and Databricks driver output.
+- **`pipeline/` functions accept explicit `dataset_config`.** `transform_channels()`, `build_model_matrix()`, and `build_pymc_model()` all accept `dataset_config=None` (falls back to global `DATASET`). The runners always pass an explicit config built from `RouterResult` — no global mutation.
+- **BOCPD context window keys follow the measure column.** `cp_context_windows` rows use `log_{measure_col}` and `{measure_col}` as keys — generic over any continuous metric, not just TRX/sales.
+- **String detail messages use ASCII only.** The quality gate check detail strings avoid Unicode so they serialize cleanly on Windows cp1252 and Databricks driver output.
 - **Signal deduplication.** `Router.run(deduplicate=True)` groups fact tables by (routing_signature, top_model) and marks less-rich duplicates `is_duplicate_signal=True`. Skip these in the insights loop.
+- **`pipeline/config.py` local fallback.** Locally, if `dataset_config.json` and the gold parquet are both absent, `_load_dataset()` returns an empty `DatasetConfig(target_col="trx")` placeholder rather than crashing. This is safe because `insights_runner` never uses the global `DATASET`.

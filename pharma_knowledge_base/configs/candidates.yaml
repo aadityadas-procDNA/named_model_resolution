@@ -203,6 +203,16 @@ flag_suffixes:
   - _indicator
   - _ind
 
+# Business logic hints for unclassified columns.
+# Map the exact column name (or its normalized/lowercase form) to a free-text description.
+# A matching hint gives a strong boost (+2.0) when scoring unclassified_metric candidates,
+# making this column the preferred fallback measure for model runs.
+#
+# Example:
+#   MYSTERY_METRIC: "net new prescriptions, always positive, weekly HCP-level aggregate"
+#   engagement_score: "composite HCP engagement score 0-100"
+business_hints: {}
+
 # Segment/status subtypes — used for PSI routing
 segment_candidates:
   - patient_status

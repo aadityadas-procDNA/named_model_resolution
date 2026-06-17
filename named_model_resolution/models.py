@@ -15,6 +15,7 @@ class ColumnSpec:
     # "heuristic_dtype" | "guardrail_metric" | "unmatched"
     expanded_name: str | None = None  # e.g. "WK_END" → "week_end_date"
     confidence: float = 0.0
+    business_hint: str | None = None  # user-supplied description from candidates.yaml business_hints
 
 
 @dataclass
@@ -50,6 +51,10 @@ class ColumnProfile:
     unique_count: int = 0
     date_grain: str | None = None  # "daily" | "weekly" | "monthly" | None
     suggested_transforms: list[str] = field(default_factory=list)
+    mean: float | None = None
+    median: float | None = None
+    std: float | None = None
+    outlier_rate: float | None = None  # fraction of values outside 1.5 × IQR fences
 
 
 @dataclass

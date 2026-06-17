@@ -10,8 +10,9 @@ Given a catalog (Databricks Unity Catalog, a SQL database, or a folder of files)
 4. Routes each fact table to the right ML model(s) — BOCPD, MMM, PSI, ARIMA, …
 5. Resolves star-schema joins (fact → dimension, 1-hop only) to inherit column subtypes
 6. Profiles sample data (skewness, nulls, date grain) and recommends statistical transforms
-7. Runs a **quality gate** per model (fill rate, variance, collinearity, date continuity, …)
-8. Executes model pipelines (BOCPD changepoint detection, MMM attribution) and emits a structured JSON payload ready for LLM summarisation
+7. Slices data to a **model-specific candidate window** (e.g. max_date − 1 yr for MMM, − 2 yrs for BOCPD) before running quality checks or model pipelines
+8. Runs a **quality gate** per model (fill rate, variance, collinearity, date continuity, …)
+9. Executes model pipelines (BOCPD changepoint detection, MMM attribution) and emits a structured JSON payload ready for LLM summarisation
 
 ---
 
@@ -164,13 +165,79 @@ for r in results:
     }
   },
   "model_signals": {
-    "BOCPD": {"ran": true, "signals": {"n_changepoints": 3, "cp_candidates": [...]}},
-    "MMM":   {"ran": true, "signals": {"model_fit": {"in_sample_mape": 0.062, "rhat_max": 1.003}}}
+    "BOCPD": {
+      "ran": true,
+      "candidate_window": {"years": 2, "cutoff_date": "2022-01-02", "max_date": "2023-12-31", "n_rows": 104},
+      "signals": {
+        "n_changepoints": 2,
+        "cp_candidates": ["..."],
+        "cp_context_windows": [
+          {
+            "changepoint_date": "2023-05-07",
+            "cp_prob": 0.72,
+            "log_TRX_at_cp": 3.89,
+            "TRX_at_cp": 140.2,
+            "window_periods": 8,
+            "series": [
+              {"date": "2023-03-12", "log_TRX": 4.21, "TRX": 180.5, "cp_prob": 0.02, "exp_run_length": 18.4},
+              "... (17 rows total: 8 before + CP + 8 after)"
+            ]
+          }
+        ],
+        "cp_probs_series": ["... full 104-entry series kept for reference"]
+      }
+    },
+    "MMM": {
+      "ran": true,
+      "candidate_window": {"years": 1, "cutoff_date": "2023-01-01", "max_date": "2023-12-31", "n_rows": 52},
+      "signals": {"model_fit": {"in_sample_mape": 0.062, "rhat_max": 1.003}}
+    }
   },
   "warnings": ["..."],
   "knowledge_base_context": {"use_cases": ["Decompose TRx drivers across channels"]}
 }
 ```
+
+> **Note on `cp_context_windows`:** Column keys (`log_TRX`, `TRX_at_cp`, etc.) are named after the actual measure column in your dataset — they are not hardcoded to "TRX" or "sales".
+
+### Accessing the candidate window programmatically
+
+The `candidate_window` for each model is available directly on the `InsightsPayload` object and in the JSON string:
+
+```python
+# From the payload object (before serialisation)
+for model_name, signal in payload.model_signals.items():
+    cw = signal.get("candidate_window")
+    if cw:
+        print(f"{model_name}: {cw['years']}yr window  "
+              f"{cw['cutoff_date']} -> {cw['max_date']}  "
+              f"({cw['n_rows']} rows)")
+
+# From the JSON string (after serialisation)
+import json
+data = json.loads(payload.to_json())
+
+for model_name, signal in data["model_signals"].items():
+    cw = signal.get("candidate_window")
+    if cw:
+        print(f"{model_name}: cutoff={cw['cutoff_date']}  rows={cw['n_rows']}")
+
+# Pass a focused slice to an LLM — strip cp_probs_series to keep the prompt small
+focused = json.loads(payload.to_json())
+for signal in focused["model_signals"].values():
+    signal.get("signals", {}).pop("cp_probs_series", None)
+
+llm_prompt = json.dumps(focused, indent=2)
+```
+
+The `candidate_window` fields:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `years` | int | Lookback from `max_date` (set in `thresholds.yaml`) |
+| `cutoff_date` | str | Earliest date included (`max_date - years`) |
+| `max_date` | str | Latest date in the dataset |
+| `n_rows` | int | Actual row count after slicing |
 
 ---
 
@@ -255,15 +322,24 @@ PIPELINE_REGISTRY["CausalImpact"] = CausalImpactPipeline
 
 ### Add a new model to the insights runner (3 steps)
 
-1. **`insights_runner/quality_gate/thresholds.yaml`** — add threshold block
+1. **`insights_runner/quality_gate/thresholds.yaml`** — add threshold block (include `candidate_window_years` to set the date lookback window)
 2. **`insights_runner/runners/causal_impact_runner.py`** — implement `ModelRunner`
 3. **`insights_runner/runners/__init__.py`** — add to `RUNNER_REGISTRY`
 
 No other files change in either case.
 
+### Adjust candidate window or BOCPD context window
+
+- **Candidate window per model** (how far back from max_date to slice before running): edit `candidate_window_years` in the model's block in `insights_runner/quality_gate/thresholds.yaml`.
+- **BOCPD context window half-width** (weeks either side of each changepoint): edit `_CP_WINDOW_WEEKS` at the top of `insights_runner/runners/bocpd_runner.py`.
+
 ---
 
 ## Key Concepts
+
+**Candidate window** — before running quality checks or model pipelines, the data is sliced to `[max_date − N years, max_date]` per model. N is set by `candidate_window_years` in `thresholds.yaml` (BOCPD=2, MMM=1, PSI=1, ARIMA=3). This keeps the JSON compact and ensures models only see the relevant recent window.
+
+**BOCPD context windows** — instead of returning the full time-series (100+ entries) in `cp_probs_series`, BOCPD also emits `cp_context_windows`: a ±8-week slice around each detected changepoint showing the actual metric value, log-transformed value, CP probability, and expected run length. Column keys are named after the actual measure column (`log_TRX`, `TRX_at_cp`, etc.). The full `cp_probs_series` is retained as an exhaustive record.
 
 **Quality gate** — before any expensive model run, `insights_runner` checks fill rate, zero variance, channel collinearity, date continuity, segment balance, and autocorrelation. FAIL → model skipped with reason; WARN → model runs with caveat flagged in output; PASS → model runs normally.
 
@@ -273,4 +349,4 @@ No other files change in either case.
 
 **Routing confidence** — models are scored and returned as a ranked list. A table scores multiple candidates; inspect `result.model_configs` to see all options and their confidence scores.
 
-**Configs, not code** — candidate lists, abbreviation maps, routing rules, quality thresholds, and transform rules all live in YAML files. Rarely need to edit Python to handle new datasets or models.
+**Configs, not code** — candidate lists, abbreviation maps, routing rules, quality thresholds, transform rules, and candidate window sizes all live in YAML files. Rarely need to edit Python to handle new datasets or models.

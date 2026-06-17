@@ -163,10 +163,12 @@ def date_continuity(
 ) -> QualityCheckResult:
     """
     Check for gaps in the date column.
-    Needs the actual df to compute consecutive diffs.
+    Grain-agnostic: gaps are measured in periods (detected from the data's median
+    inter-observation gap), not hard-coded to weeks.  max_gap_weeks in thresholds.yaml
+    is therefore interpreted as max_gap_periods regardless of actual grain.
     """
-    max_gap_weeks = params.get("max_gap_weeks", 4)
-    min_weeks = params.get("min_weeks", params.get("min_row_count", 52))
+    max_gap_periods = params.get("max_gap_weeks", 4)   # "weeks" in YAML = periods
+    min_periods = params.get("min_weeks", params.get("min_row_count", 52))
 
     date_specs = _specs_by_subtype(column_specs, "date")
     if not date_specs:
@@ -188,41 +190,54 @@ def date_continuity(
 
     try:
         dates = pd.to_datetime(df[date_col]).dropna().sort_values().unique()
-        n_weeks = len(dates)
+        n_periods = len(dates)
 
-        if n_weeks < min_weeks:
+        if n_periods < min_periods:
             return QualityCheckResult(
                 check_name="date_continuity",
                 status="FAIL",
-                detail=f"only {n_weeks} unique dates -- need >= {min_weeks}",
-                metric=float(n_weeks),
+                detail=f"only {n_periods} unique dates -- need >= {min_periods}",
+                metric=float(n_periods),
             )
 
-        if n_weeks < 2:
+        if n_periods < 2:
             return QualityCheckResult(
                 check_name="date_continuity",
                 status="PASS",
                 detail="single date point -- cannot check continuity",
-                metric=float(n_weeks),
+                metric=float(n_periods),
             )
 
         gaps_days = pd.Series(dates).diff().dropna().dt.days
-        max_gap_days = int(gaps_days.max())
-        max_gap_w = max_gap_days / 7.0
-        n_gaps = int((gaps_days > max_gap_weeks * 7).sum())
 
-        if max_gap_w > max_gap_weeks:
+        # Detect the typical inter-observation period from the data itself.
+        # This makes the check grain-agnostic: daily, weekly, monthly all normalise
+        # to "number of missed periods" rather than hard-coded days * 7.
+        typical_period_days = float(gaps_days.median())
+        if typical_period_days <= 0:
+            typical_period_days = 7.0  # fallback if dates are degenerate
+
+        gaps_in_periods = gaps_days / typical_period_days
+        max_gap_obs = float(gaps_in_periods.max())
+        n_gaps = int((gaps_in_periods > max_gap_periods).sum())
+
+        # Infer grain label for the detail message
+        profiles_map = _profile_map(column_profiles)
+        grain = (profiles_map.get(date_col) or type("", (), {"date_grain": None})()).date_grain
+        grain_label = grain if grain else f"~{typical_period_days:.0f}-day"
+
+        if max_gap_obs > max_gap_periods:
             return QualityCheckResult(
                 check_name="date_continuity",
                 status="WARN",
-                detail=f"{n_gaps} gap(s) > {max_gap_weeks} weeks detected "
-                       f"(largest ~= {max_gap_w:.1f} weeks)",
-                metric=round(max_gap_w, 2),
+                detail=f"{n_gaps} gap(s) > {max_gap_periods} {grain_label} periods detected "
+                       f"(largest ~= {max_gap_obs:.1f} periods)",
+                metric=round(max_gap_obs, 2),
             )
         return QualityCheckResult(
             check_name="date_continuity",
             status="PASS",
-            detail=f"no gaps > {max_gap_weeks} weeks in {n_weeks}-week series",
+            detail=f"no gaps > {max_gap_periods} periods in {n_periods}-point {grain_label} series",
             metric=0.0,
         )
     except Exception as exc:
