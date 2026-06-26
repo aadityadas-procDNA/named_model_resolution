@@ -54,6 +54,13 @@ _DATE_SUFFIX_TOKENS_GUARD = frozenset({"date", "dt", "datetime", "timestamp", "t
 # (numeric → unclassified_metric; string → dimension_attribute).
 _ROLLING_METRIC_RE = re.compile(r"_last_\d+[dD]$")
 
+# Multi-label: valid dual-subtype pairs.  A column whose primary subtype is one
+# member of a pair will also be checked against the other member's candidate list.
+# Extend this set to support additional dual-label combinations in future.
+_DUAL_LABEL_PAIRS: frozenset[frozenset[str]] = frozenset({
+    frozenset({"channel", "measure"}),
+})
+
 
 def _normalize_name(name: str) -> str:
     """Lowercase and replace non-alphanumeric characters with underscores."""
@@ -201,6 +208,32 @@ def _token_overlap_match(
     return None
 
 
+def _find_secondary_subtypes(
+    primary: str,
+    norm_name: str,
+    candidates: dict[str, list[str]],
+) -> list[str]:
+    """
+    Return secondary subtype(s) for a column whose primary subtype is *primary*.
+
+    For each dual-label pair that contains *primary*, check whether *norm_name*
+    also matches the other member's candidate list (exact or token-boundary).
+    Returns an empty list when no secondary is found.
+    """
+    secondary: list[str] = []
+    for pair in _DUAL_LABEL_PAIRS:
+        if primary not in pair:
+            continue
+        for other in pair - {primary}:
+            cand_list = candidates.get(f"{other}_candidates", [])
+            for cand in cand_list:
+                cand_norm = _normalize_name(cand)
+                if norm_name == cand_norm or _token_boundary_match(cand_norm, norm_name):
+                    secondary.append(other)
+                    break
+    return secondary
+
+
 class ColumnMatcher:
     def __init__(self, configs_dir: str | Path) -> None:
         configs_dir = Path(configs_dir)
@@ -269,6 +302,9 @@ class ColumnMatcher:
                 expanded_name=expanded_name,
                 confidence=confidence,
                 business_hint=self._get_hint(name, norm),
+                secondary_subtypes=_find_secondary_subtypes(
+                    subtype, norm_for_matching, self._candidates
+                ),
             )
 
         # Step 4 — heuristic fallbacks
@@ -309,6 +345,9 @@ class ColumnMatcher:
                 expanded_name=expanded_name,
                 confidence=confidence,
                 business_hint=self._get_hint(name, norm),
+                secondary_subtypes=_find_secondary_subtypes(
+                    subtype, norm_for_matching, self._candidates
+                ),
             )
 
         # 4c — numeric fallback → unclassified_metric (guardrail gate)
