@@ -212,7 +212,14 @@ def _section_columns(d: dict) -> str:
         name = _h(c.get("name"))
         dtype = _h(c.get("dtype"))
         subtype = c.get("subtype", "unknown")
-        pill = _subtype_pill(subtype)
+        secondary = c.get("secondary_subtypes") or []
+        sec_html = "".join(
+            f'<span style="font-size:10px;color:#6b7280;margin-left:3px">also:</span>'
+            f"{_subtype_pill(s)}"
+            if i == 0 else _subtype_pill(s)
+            for i, s in enumerate(secondary)
+        )
+        pill = _subtype_pill(subtype) + (f'<span style="margin-left:4px">{sec_html}</span>' if sec_html else "")
 
         conf = c.get("confidence")
         conf_color = "#d97706" if conf is not None and float(conf) < 0.8 else "#111827"

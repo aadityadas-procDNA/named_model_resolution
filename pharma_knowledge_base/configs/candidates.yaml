@@ -201,6 +201,10 @@ channel_candidates:
   - media_spend
   - promo_spend
   - detailing
+  # HCP activity counts that double as MMM channel inputs (dual-label: channel + measure)
+  - virtual_calls
+  - email_touches
+  - total_touches
 
 # Suffixes/prefixes used for key detection (checked against column name)
 key_candidates_suffixes:

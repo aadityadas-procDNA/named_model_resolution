@@ -16,6 +16,9 @@ class ColumnSpec:
     expanded_name: str | None = None  # e.g. "WK_END" → "week_end_date"
     confidence: float = 0.0
     business_hint: str | None = None  # user-supplied description from candidates.yaml business_hints
+    secondary_subtypes: list[str] = field(default_factory=list)
+    # Additional valid subtypes beyond the primary.  Valid dual-label pairs are
+    # defined by _DUAL_LABEL_PAIRS in column_matcher.py (e.g. channel + measure).
 
 
 @dataclass

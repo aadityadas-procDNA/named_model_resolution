@@ -95,7 +95,7 @@ def _build_dataset_config(
 
     channels = []
     for s in specs:
-        if s.semantic_subtype != "channel":
+        if s.semantic_subtype != "channel" and "channel" not in s.secondary_subtypes:
             continue
         if s.dtype.lower() in _NON_NUMERIC_DTYPES:
             continue  # skip — cannot apply numeric adstock/decay to string column

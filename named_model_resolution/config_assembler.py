@@ -26,7 +26,11 @@ from .models import DatamartCatalog, ModelConfig, TableClassification
 
 
 def _subtypes_present(classification: TableClassification) -> set[str]:
-    return {c.semantic_subtype for c in classification.columns}
+    subtypes: set[str] = set()
+    for c in classification.columns:
+        subtypes.add(c.semantic_subtype)
+        subtypes.update(c.secondary_subtypes)
+    return subtypes
 
 
 def _measure_names_present(classification: TableClassification) -> set[str]:

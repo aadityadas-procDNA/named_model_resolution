@@ -35,7 +35,11 @@ def _specs_by_subtype(
     column_specs: list[ColumnSpec],
     *subtypes: str,
 ) -> list[ColumnSpec]:
-    return [s for s in column_specs if s.semantic_subtype in subtypes]
+    return [
+        s for s in column_specs
+        if s.semantic_subtype in subtypes
+        or any(sub in subtypes for sub in s.secondary_subtypes)
+    ]
 
 
 # -- Check functions ----------------------------------------------------------

@@ -76,6 +76,7 @@ def build(
             "name": spec.name,
             "dtype": spec.dtype,
             "subtype": spec.semantic_subtype,
+            "secondary_subtypes": spec.secondary_subtypes,
             "confidence": round(spec.confidence, 4),
             "match_source": spec.match_source,
         }
